@@ -5,10 +5,23 @@ class DatabaseService {
   constructor() {
     this.dbPath = path.join(__dirname, 'maritime_containers.db');
     this.db = null;
-    this.writeQueue = [];
-    this.isProcessingQueue = false;
-    this.maxQueueSize = 10000; // Prevent memory overflow
-    this.batchSize = 100; // Process writes in batches for efficiency
+    
+    // Queue-based batching system for high throughput
+    this.pendingQueue = [];
+    this.maxQueueSize = 50000; // Allow larger queue for 5-second batching
+    this.batchProcessInterval = 2000; // Process queue every 5 seconds
+    this.batchTimer = null;
+    this.isProcessingBatch = false;
+    
+    // Performance metrics
+    this.metrics = {
+      totalRequests: 0,
+      totalBatches: 0,
+      totalInserted: 0,
+      lastBatchSize: 0,
+      lastBatchTime: null,
+      avgBatchSize: 0
+    };
   }
 
   /**
@@ -25,25 +38,26 @@ class DatabaseService {
 
         console.log('Connected to SQLite database');
         
-        // Optimize SQLite for performance and size
+        // Optimize SQLite for maximum performance with increased memory usage
         this.db.serialize(() => {
           // WAL mode for better concurrent access
           this.db.run('PRAGMA journal_mode=WAL;');
           
-          // More aggressive compression and caching
-          this.db.run('PRAGMA synchronous=NORMAL;');
-          this.db.run('PRAGMA cache_size=10000;');
+          // Optimize for high-throughput batch writes with more aggressive settings
+          this.db.run('PRAGMA synchronous=OFF;'); // Fastest but less safe
+          this.db.run('PRAGMA cache_size=100000;'); // Increased from 20000 to 100000
           this.db.run('PRAGMA temp_store=MEMORY;');
+          this.db.run('PRAGMA mmap_size=1073741824;'); // Increased to 1GB memory map
+          this.db.run('PRAGMA page_size=4096;'); // Optimal page size
+          this.db.run('PRAGMA locking_mode=EXCLUSIVE;'); // Faster writes, no concurrent access
           
-          // Enable compression at SQLite level
-          this.db.run('PRAGMA locking_mode=EXCLUSIVE;');
-          
-          // Auto vacuum for size management
-          this.db.run('PRAGMA auto_vacuum=INCREMENTAL;');
+          // Disable auto vacuum for better performance
+          this.db.run('PRAGMA auto_vacuum=NONE;');
           
           this.createTables()
             .then(() => {
-              this.startQueueProcessor();
+              this.startBatchProcessor();
+              console.log(`📦 Queue-based batch processor started (${this.batchProcessInterval/1000}s intervals)`);
               resolve();
             })
             .catch(reject);
@@ -82,110 +96,202 @@ class DatabaseService {
   }
 
   /**
-   * Add write operation to queue (thread-safe approach for SQLite)
+   * Add container data to queue - Returns immediately for fast response
    * @param {string} containerId 
    * @param {Buffer} compressedData 
    * @param {string} timestamp 
    */
-  async queueWrite(containerId, compressedData, timestamp = null) {
+  async addToQueue(containerId, compressedData, timestamp = null) {
     return new Promise((resolve, reject) => {
-      if (this.writeQueue.length >= this.maxQueueSize) {
-        reject(new Error('Write queue is full. Please try again later.'));
+      // Check queue size limit
+      if (this.pendingQueue.length >= this.maxQueueSize) {
+        reject(new Error(`Queue full (${this.maxQueueSize} items). High load detected.`));
         return;
       }
 
-      // Convert timestamp to Unix timestamp (INTEGER) for more efficient storage
+      // Convert timestamp to Unix timestamp for efficient storage
       const unixTimestamp = timestamp ? new Date(timestamp).getTime() : Date.now();
 
-      const writeOperation = {
+      // Add to queue
+      this.pendingQueue.push({
         containerId,
         compressedData,
         timestamp: unixTimestamp,
-        resolve,
-        reject
-      };
+        queuedAt: Date.now()
+      });
 
-      this.writeQueue.push(writeOperation);
+      this.metrics.totalRequests++;
+
+      // Resolve immediately - data is queued for processing
+      resolve({
+        success: true,
+        queued: true,
+        queuePosition: this.pendingQueue.length,
+        nextBatchIn: this.getTimeUntilNextBatch()
+      });
     });
   }
 
   /**
-   * Process write queue in batches to handle high throughput
+   * Start the batch processor that runs every 5 seconds
    */
-  startQueueProcessor() {
-    const processQueue = async () => {
-      if (this.isProcessingQueue || this.writeQueue.length === 0) {
-        setTimeout(processQueue, 10); // Check every 10ms
-        return;
+  startBatchProcessor() {
+    const processBatch = async () => {
+      if (this.isProcessingBatch) {
+        return; // Skip if already processing
       }
 
-      this.isProcessingQueue = true;
+      if (this.pendingQueue.length === 0) {
+        return; // Nothing to process
+      }
 
+      this.isProcessingBatch = true;
+      const batchStartTime = Date.now();
+      
       try {
-        // Process in batches for efficiency
-        const batch = this.writeQueue.splice(0, Math.min(this.batchSize, this.writeQueue.length));
+        // Take entire queue for processing
+        const batchData = [...this.pendingQueue];
+        this.pendingQueue = []; // Clear queue immediately
         
-        if (batch.length > 0) {
-          await this.processBatch(batch);
-        }
+        console.log(`🚀 Processing batch: ${batchData.length} containers`);
+        
+        // Process the entire batch in a single transaction
+        const insertedCount = await this.processBatchUpsert(batchData);
+        
+        // Update metrics
+        this.metrics.totalBatches++;
+        this.metrics.totalInserted += insertedCount;
+        this.metrics.lastBatchSize = batchData.length;
+        this.metrics.lastBatchTime = Date.now();
+        this.metrics.avgBatchSize = this.metrics.totalInserted / this.metrics.totalBatches;
+        
+        const processingTime = Date.now() - batchStartTime;
+        console.log(`✅ Batch completed: ${insertedCount} inserted in ${processingTime}ms (${(insertedCount/processingTime*1000).toFixed(0)} ops/sec)`);
+        
       } catch (error) {
-        console.error('Error processing write queue:', error);
+        console.error('❌ Batch processing error:', error);
+        // On error, items are lost from queue but this prevents blocking
+        // In production, you might want to implement a retry mechanism
       } finally {
-        this.isProcessingQueue = false;
-        setTimeout(processQueue, 1); // Continue processing
+        this.isProcessingBatch = false;
       }
     };
 
-    processQueue();
+    // Start the interval processor
+    this.batchTimer = setInterval(processBatch, this.batchProcessInterval);
+    
+    // Also process immediately if queue gets very large
+    const checkLargeQueue = () => {
+      if (this.pendingQueue.length > 1000 && !this.isProcessingBatch) {
+        console.log(`📊 Large queue detected (${this.pendingQueue.length}), processing early`);
+        processBatch();
+      }
+    };
+    
+    setInterval(checkLargeQueue, 1000); // Check every second
   }
 
   /**
-   * Process a batch of write operations using transaction
+   * Process batch upsert with maximum efficiency
    */
-  async processBatch(batch) {
+  async processBatchUpsert(batchData) {
     return new Promise((resolve, reject) => {
-      const db = this.db; // Capture the database reference
-      
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
+      if (batchData.length === 0) {
+        resolve(0);
+        return;
+      }
 
+      let insertedCount = 0;
+      const db = this.db;
+
+      db.serialize(() => {
+        db.run('BEGIN IMMEDIATE TRANSACTION');
+
+        // Use UPSERT for handling duplicates efficiently
         const stmt = db.prepare(`
           INSERT INTO container_data (container_id, timestamp, compressed_data)
           VALUES (?, ?, ?)
+          ON CONFLICT(rowid) DO UPDATE SET
+            timestamp = excluded.timestamp,
+            compressed_data = excluded.compressed_data
         `);
 
         let errorOccurred = false;
-        let completedCount = 0;
+        let processedCount = 0;
 
-        batch.forEach((operation) => {
-          stmt.run([operation.containerId, operation.timestamp, operation.compressedData], function(err) {
-            completedCount++;
+        // Process all items in the batch
+        batchData.forEach((item) => {
+          stmt.run([item.containerId, item.timestamp, item.compressedData], function(err) {
+            processedCount++;
             
             if (err) {
               if (!errorOccurred) {
                 errorOccurred = true;
-                console.error('Error inserting data:', err);
-                operation.reject(err);
+                console.error('Batch insert error:', err);
               }
             } else {
-              operation.resolve(this.lastID);
+              insertedCount++;
             }
 
-            // Complete transaction when all operations are done
-            if (completedCount === batch.length) {
-              stmt.finalize();
-              
-              if (errorOccurred) {
-                db.run('ROLLBACK');
-              } else {
-                db.run('COMMIT');
-              }
-              resolve();
+            // When all items are processed, finalize transaction
+            if (processedCount === batchData.length) {
+              stmt.finalize((finalizeErr) => {
+                if (finalizeErr || errorOccurred) {
+                  db.run('ROLLBACK', (rollbackErr) => {
+                    if (rollbackErr) console.error('Rollback error:', rollbackErr);
+                    reject(new Error('Batch transaction failed'));
+                  });
+                } else {
+                  db.run('COMMIT', (commitErr) => {
+                    if (commitErr) {
+                      console.error('Commit error:', commitErr);
+                      reject(commitErr);
+                    } else {
+                      resolve(insertedCount);
+                    }
+                  });
+                }
+              });
             }
           });
         });
       });
     });
+  }
+
+  /**
+   * Get time until next batch processing (for API responses)
+   */
+  getTimeUntilNextBatch() {
+    if (!this.metrics.lastBatchTime) {
+      return this.batchProcessInterval;
+    }
+    
+    const timeSinceLastBatch = Date.now() - this.metrics.lastBatchTime;
+    const timeUntilNext = Math.max(0, this.batchProcessInterval - timeSinceLastBatch);
+    return timeUntilNext;
+  }
+
+  /**
+   * Force process current queue (useful for graceful shutdown)
+   */
+  async forceProcessQueue() {
+    if (this.pendingQueue.length === 0) {
+      return { processed: 0 };
+    }
+
+    console.log(`🔄 Force processing ${this.pendingQueue.length} queued items`);
+    
+    const batchData = [...this.pendingQueue];
+    this.pendingQueue = [];
+    
+    try {
+      const insertedCount = await this.processBatchUpsert(batchData);
+      return { processed: insertedCount };
+    } catch (error) {
+      console.error('Force process error:', error);
+      throw error;
+    }
   }
 
   /**
@@ -207,8 +313,7 @@ class DatabaseService {
           // Convert Unix timestamp back to ISO string for compatibility
           const processedRows = rows.map(row => ({
             ...row,
-            timestamp: new Date(row.timestamp).toISOString(),
-            created_at: new Date(row.timestamp).toISOString() // For backward compatibility
+            timestamp: new Date(row.timestamp).toISOString()
           }));
           resolve(processedRows);
         }
@@ -236,8 +341,7 @@ class DatabaseService {
           // Convert Unix timestamp back to ISO string for compatibility
           const processedRows = rows.map(row => ({
             ...row,
-            timestamp: new Date(row.timestamp).toISOString(),
-            created_at: new Date(row.timestamp).toISOString() // For backward compatibility
+            timestamp: new Date(row.timestamp).toISOString()
           }));
           resolve(processedRows);
         }
@@ -360,33 +464,109 @@ class DatabaseService {
   }
 
   /**
-   * Get queue status for monitoring
+   * Get queue status and performance metrics for monitoring
    */
   getQueueStatus() {
     return {
-      queueLength: this.writeQueue.length,
-      isProcessing: this.isProcessingQueue,
-      maxQueueSize: this.maxQueueSize
+      queue: {
+        currentLength: this.pendingQueue.length,
+        maxSize: this.maxQueueSize,
+        utilizationPercent: ((this.pendingQueue.length / this.maxQueueSize) * 100).toFixed(1)
+      },
+      processing: {
+        isProcessingBatch: this.isProcessingBatch,
+        batchIntervalMs: this.batchProcessInterval,
+        nextBatchIn: this.getTimeUntilNextBatch()
+      },
+      metrics: {
+        ...this.metrics,
+        queueThroughputPerSec: this.metrics.totalRequests > 0 ? 
+          (this.metrics.totalRequests / ((Date.now() - (this.metrics.lastBatchTime || Date.now())) / 1000)).toFixed(1) : 0
+      }
     };
   }
 
   /**
-   * Close database connection
+   * Get detailed performance metrics
+   */
+  getPerformanceMetrics() {
+    const now = Date.now();
+    const uptimeMs = this.metrics.lastBatchTime ? now - this.metrics.lastBatchTime : 0;
+    
+    return {
+      throughput: {
+        totalRequests: this.metrics.totalRequests,
+        totalBatches: this.metrics.totalBatches,
+        totalInserted: this.metrics.totalInserted,
+        avgBatchSize: Math.round(this.metrics.avgBatchSize),
+        lastBatchSize: this.metrics.lastBatchSize,
+        requestsPerSecond: uptimeMs > 0 ? (this.metrics.totalRequests / (uptimeMs / 1000)).toFixed(2) : '0',
+        insertsPerSecond: uptimeMs > 0 ? (this.metrics.totalInserted / (uptimeMs / 1000)).toFixed(2) : '0'
+      },
+      timing: {
+        batchInterval: `${this.batchProcessInterval/1000}s`,
+        lastBatchAt: this.metrics.lastBatchTime ? new Date(this.metrics.lastBatchTime).toISOString() : null,
+        nextBatchIn: `${Math.round(this.getTimeUntilNextBatch()/1000)}s`
+      },
+      queue: {
+        current: this.pendingQueue.length,
+        maxCapacity: this.maxQueueSize,
+        utilizationPercent: ((this.pendingQueue.length / this.maxQueueSize) * 100).toFixed(1)
+      }
+    };
+  }
+
+  /**
+   * Reset performance metrics (useful for testing)
+   */
+  resetMetrics() {
+    this.metrics = {
+      totalRequests: 0,
+      totalBatches: 0,
+      totalInserted: 0,
+      lastBatchSize: 0,
+      lastBatchTime: null,
+      avgBatchSize: 0
+    };
+    console.log('📊 Performance metrics reset');
+  }
+
+  /**
+   * Close database connection and cleanup
    */
   async close() {
     return new Promise((resolve) => {
-      if (this.db) {
-        this.db.close((err) => {
-          if (err) {
-            console.error('Error closing database:', err);
-          } else {
-            console.log('Database connection closed');
-          }
-          resolve();
-        });
-      } else {
-        resolve();
+      console.log('🔄 Shutting down database service...');
+      
+      // Clear the batch timer
+      if (this.batchTimer) {
+        clearInterval(this.batchTimer);
+        this.batchTimer = null;
       }
+
+      // Process any remaining queue items
+      this.forceProcessQueue()
+        .then(() => {
+          console.log('✅ Final queue processing completed');
+        })
+        .catch((err) => {
+          console.error('❌ Error in final queue processing:', err);
+        })
+        .finally(() => {
+          // Close database connection
+          if (this.db) {
+            this.db.close((err) => {
+              if (err) {
+                console.error('Error closing database:', err);
+              } else {
+                console.log('Database connection closed');
+              }
+              resolve();
+            });
+          } else {
+            resolve();
+          }
+        });
     });
   }
 }

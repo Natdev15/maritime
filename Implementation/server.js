@@ -110,15 +110,16 @@ class MaritimeServer {
         // Compress the data
         const compressedData = await this.compressionService.compress(containerData);
         
-        // Queue for database write
-        await this.databaseService.queueWrite(containerId, compressedData);
+        // Add to queue (returns immediately for fast response)
+        const queueResult = await this.databaseService.addToQueue(containerId, compressedData);
         
         this.stats.successfulWrites++;
         
         res.status(201).json({ 
           success: true, 
           containerId,
-          compressionRatio: this.compressionService.getCompressionRatio(containerData, compressedData)
+          compressionRatio: this.compressionService.getCompressionRatio(containerData, compressedData),
+          queue: queueResult
         });
         
       } catch (error) {
@@ -131,7 +132,7 @@ class MaritimeServer {
       }
     });
 
-    // Bulk container data ingestion
+    // Bulk container data ingestion (optimized for high throughput)
     this.app.post('/api/containers/bulk', async (req, res) => {
       try {
         const containers = req.body.containers || req.body;
@@ -142,33 +143,47 @@ class MaritimeServer {
 
         const results = [];
         const errors = [];
+        const startTime = Date.now();
 
-        for (const containerData of containers) {
+        // Process all containers in parallel for maximum speed
+        const promises = containers.map(async (containerData, index) => {
           try {
             const containerId = containerData.containerId || containerData.iso6346;
             
             if (!containerId) {
-              errors.push({ container: containerData, error: 'Missing container ID' });
-              continue;
+              errors.push({ index, container: containerData, error: 'Missing container ID' });
+              return null;
             }
 
             const compressedData = await this.compressionService.compress(containerData);
-            await this.databaseService.queueWrite(containerId, compressedData);
+            const queueResult = await this.databaseService.addToQueue(containerId, compressedData);
             
-            results.push({ containerId, success: true });
             this.stats.successfulWrites++;
+            return { index, containerId, success: true, queue: queueResult };
             
           } catch (error) {
-            errors.push({ container: containerData, error: error.message });
+            errors.push({ index, container: containerData, error: error.message });
             this.stats.errors++;
+            return null;
           }
-        }
+        });
+
+        // Wait for all processing to complete
+        const allResults = await Promise.all(promises);
+        const successfulResults = allResults.filter(r => r !== null);
+        
+        const processingTime = Date.now() - startTime;
+        const throughput = containers.length / (processingTime / 1000);
 
         res.json({ 
-          processed: results.length,
+          processed: successfulResults.length,
           errors: errors.length,
-          results,
-          errors: errors.slice(0, 10) // Limit error details
+          totalContainers: containers.length,
+          processingTimeMs: processingTime,
+          throughputPerSecond: Math.round(throughput),
+          results: successfulResults.slice(0, 10), // Limit response size
+          errors: errors.slice(0, 5), // Limit error details
+          queue: this.databaseService.getQueueStatus()
         });
         
       } catch (error) {
@@ -197,7 +212,6 @@ class MaritimeServer {
               id: row.id,
               containerId: row.container_id,
               timestamp: row.timestamp,
-              createdAt: row.created_at,
               data: decompressedData
             };
           } catch (error) {
@@ -206,7 +220,6 @@ class MaritimeServer {
               id: row.id,
               containerId: row.container_id,
               timestamp: row.timestamp,
-              createdAt: row.created_at,
               error: 'Failed to decompress data'
             };
           }
@@ -236,14 +249,12 @@ class MaritimeServer {
             const decompressedData = await this.compressionService.decompress(row.compressed_data);
             return {
               timestamp: row.timestamp,
-              createdAt: row.created_at,
               data: decompressedData
             };
           } catch (error) {
             console.error('Error decompressing data:', error);
             return {
               timestamp: row.timestamp,
-              createdAt: row.created_at,
               error: 'Failed to decompress data'
             };
           }
@@ -288,6 +299,80 @@ class MaritimeServer {
       }
     });
 
+    // Queue performance metrics (detailed)
+    this.app.get('/api/queue/metrics', (req, res) => {
+      try {
+        const performanceMetrics = this.databaseService.getPerformanceMetrics();
+        const queueStatus = this.databaseService.getQueueStatus();
+        
+        res.json({
+          queue: queueStatus,
+          performance: performanceMetrics,
+          server: {
+            totalRequests: this.stats.totalRequests,
+            successfulWrites: this.stats.successfulWrites,
+            errors: this.stats.errors,
+            uptime: Date.now() - this.stats.startTime,
+            errorRate: this.stats.totalRequests > 0 ? 
+              ((this.stats.errors / this.stats.totalRequests) * 100).toFixed(2) + '%' : '0%'
+          }
+        });
+      } catch (error) {
+        console.error('Error fetching queue metrics:', error);
+        res.status(500).json({ 
+          error: 'Failed to fetch queue metrics',
+          message: error.message 
+        });
+      }
+    });
+
+    // Force process queue (for testing/maintenance)
+    this.app.post('/api/queue/process', async (req, res) => {
+      try {
+        const result = await this.databaseService.forceProcessQueue();
+        const queueStatus = this.databaseService.getQueueStatus();
+        
+        res.json({
+          success: true,
+          processed: result.processed,
+          message: `Force processed ${result.processed} queued items`,
+          queue: queueStatus
+        });
+      } catch (error) {
+        console.error('Error force processing queue:', error);
+        res.status(500).json({ 
+          error: 'Failed to force process queue',
+          message: error.message 
+        });
+      }
+    });
+
+    // Reset metrics (for testing)
+    this.app.post('/api/queue/reset-metrics', (req, res) => {
+      try {
+        this.databaseService.resetMetrics();
+        
+        // Reset server stats too
+        this.stats = {
+          totalRequests: 0,
+          successfulWrites: 0,
+          errors: 0,
+          startTime: Date.now()
+        };
+        
+        res.json({
+          success: true,
+          message: 'All metrics have been reset'
+        });
+      } catch (error) {
+        console.error('Error resetting metrics:', error);
+        res.status(500).json({ 
+          error: 'Failed to reset metrics',
+          message: error.message 
+        });
+      }
+    });
+
     // Health check
     this.app.get('/api/health', (req, res) => {
       const queueStatus = this.databaseService.getQueueStatus();
@@ -295,7 +380,7 @@ class MaritimeServer {
         status: 'healthy',
         timestamp: new Date().toISOString(),
         uptime: Date.now() - this.stats.startTime,
-        queueLength: queueStatus.queueLength,
+        queue: queueStatus.queue,
         memoryUsage: process.memoryUsage()
       };
 
