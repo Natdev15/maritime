@@ -4,21 +4,32 @@ const helmet = require('helmet');
 const path = require('path');
 const CompressionService = require('./compression');
 const DatabaseService = require('./database');
+const Config = require('./config');
+const HttpClient = require('./http-client');
+const Scheduler = require('./scheduler');
 
 class MaritimeServer {
   constructor() {
+    // Initialize configuration first
+    this.config = new Config();
+    
     this.app = express();
-    this.port = process.env.PORT || 3000;
+    this.port = this.config.port;
     this.compressionService = new CompressionService();
     this.databaseService = new DatabaseService();
+    this.httpClient = new HttpClient();
+    this.scheduler = new Scheduler(this.config, this.databaseService, this.compressionService, this.httpClient);
     
     // Statistics tracking
     this.stats = {
       totalRequests: 0,
       successfulWrites: 0,
       errors: 0,
-      startTime: Date.now()
+      startTime: Date.now(),
+      nodeType: this.config.nodeType
     };
+    
+    console.log(`🚢 Maritime Server initializing in ${this.config.nodeType} mode`);
   }
 
   /**
@@ -41,10 +52,15 @@ class MaritimeServer {
       // Setup routes
       this.setupRoutes();
       
+      // Start scheduler if in master mode
+      if (this.config.isMaster()) {
+        this.scheduler.start();
+      }
+      
       // Start server
       this.start();
       
-      console.log('Maritime Container Server initialized successfully');
+      console.log(`Maritime Container Server initialized successfully in ${this.config.nodeType} mode`);
     } catch (error) {
       console.error('Failed to initialize server:', error);
       process.exit(1);
@@ -76,8 +92,8 @@ class MaritimeServer {
     this.app.use(cors());
     
     // Body parsing
-    this.app.use(express.json({ limit: '10mb' }));
-    this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+    this.app.use(express.json({ limit: '100mb' })); // Increased for compressed data
+    this.app.use(express.urlencoded({ extended: true, limit: '100mb' }));
     
     // Static files
     this.app.use(express.static(path.join(__dirname, 'public')));
@@ -91,13 +107,122 @@ class MaritimeServer {
   }
 
   /**
-   * Setup API routes
+   * Setup API routes based on master/slave mode
    */
   setupRoutes() {
     // Home page
     this.app.get('/', (req, res) => {
       res.sendFile(path.join(__dirname, 'public', 'index.html'));
     });
+
+    // Health check endpoint (available in both modes)
+    this.app.get('/api/health', (req, res) => {
+      res.json({
+        status: 'healthy',
+        nodeType: this.config.nodeType,
+        timestamp: new Date().toISOString(),
+        uptime: Date.now() - this.stats.startTime,
+        config: this.config.getSummary()
+      });
+    });
+
+    // Slave-only endpoint: Receive and forward compressed data
+    if (this.config.isSlave()) {
+      this.setupSlaveRoutes();
+    }
+
+    // Master-only endpoints: Container data ingestion and management
+    if (this.config.isMaster()) {
+      this.setupMasterRoutes();
+    }
+
+    // Common endpoints for stats and health
+    this.setupCommonRoutes();
+
+    // 404 handler
+    this.app.use('*', (req, res) => {
+      res.status(404).json({ error: 'Endpoint not found' });
+    });
+  }
+
+  /**
+   * Setup slave-specific routes
+   */
+  setupSlaveRoutes() {
+    console.log('🔗 Setting up slave-specific routes');
+
+    // Receive compressed data from master and forward it
+    this.app.post('/api/receive-compressed', async (req, res) => {
+      try {
+        const { compressedData, metadata } = req.body;
+        
+        if (!compressedData) {
+          return res.status(400).json({ error: 'Missing compressedData in request body' });
+        }
+
+        console.log(`📨 Received compressed data from master`);
+        console.log(`📊 Metadata:`, metadata);
+
+        // Convert base64 back to buffer
+        const compressedBuffer = Buffer.from(compressedData, 'base64');
+        console.log(`📊 Compressed data size: ${this.formatBytes(compressedBuffer.length)}`);
+
+        // Decompress the data
+        console.log('🔓 Decompressing received data...');
+        const decompressedContainers = await this.compressionService.decompressMultiple(compressedBuffer);
+        
+        console.log(`✅ Successfully decompressed ${decompressedContainers.length} containers`);
+
+        // Forward decompressed data to target endpoint
+        console.log('📨 Forwarding decompressed data...');
+        const forwardResult = await this.httpClient.forwardDecompressedData(
+          this.config.getForwardToUrl(),
+          decompressedContainers,
+          {
+            receivedAt: new Date().toISOString(),
+            originalMetadata: metadata,
+            decompressedContainerCount: decompressedContainers.length
+          }
+        );
+
+        if (forwardResult.success) {
+          console.log(`✅ Successfully forwarded ${decompressedContainers.length} containers`);
+          res.json({
+            success: true,
+            message: 'Data received, decompressed, and forwarded successfully',
+            containersProcessed: decompressedContainers.length,
+            forwardResult: {
+              status: forwardResult.responseStatus,
+              forwardedContainers: forwardResult.forwardedContainers
+            }
+          });
+        } else {
+          console.error('❌ Failed to forward decompressed data:', forwardResult.error);
+          res.status(500).json({
+            success: false,
+            error: 'Failed to forward decompressed data',
+            details: forwardResult.error,
+            containersProcessed: decompressedContainers.length
+          });
+        }
+
+      } catch (error) {
+        this.stats.errors++;
+        console.error('❌ Error processing compressed data:', error);
+        res.status(500).json({
+          success: false,
+          error: 'Failed to process compressed data',
+          message: error.message
+        });
+      }
+    });
+  }
+
+  /**
+   * Setup master-specific routes
+   */
+  setupMasterRoutes() {
+    console.log('🎯 Setting up master-specific routes');
 
     // Container data ingestion endpoint
     this.app.post('/api/container', async (req, res) => {
@@ -138,7 +263,7 @@ class MaritimeServer {
       }
     });
 
-    // Bulk container data ingestion (optimized for high throughput)
+    // Bulk container data ingestion
     this.app.post('/api/containers/bulk', async (req, res) => {
       try {
         const containers = req.body.containers || req.body;
@@ -187,8 +312,8 @@ class MaritimeServer {
           totalContainers: containers.length,
           processingTimeMs: processingTime,
           throughputPerSecond: Math.round(throughput),
-          results: successfulResults.slice(0, 10), // Limit response size
-          errors: errors.slice(0, 5), // Limit error details
+          results: successfulResults.slice(0, 10),
+          errors: errors.slice(0, 5),
           queue: this.databaseService.getQueueStatus()
         });
         
@@ -202,8 +327,68 @@ class MaritimeServer {
       }
     });
 
-    // Get recent container data
+    // Manual trigger for compression task (testing purposes)
+    this.app.post('/api/compress-send', async (req, res) => {
+      try {
+        console.log('🔧 Manual compression task triggered');
+        await this.scheduler.forceRun();
+        res.json({ 
+          success: true, 
+          message: 'Compression task triggered successfully' 
+        });
+      } catch (error) {
+        console.error('Manual compression task failed:', error);
+        res.status(500).json({ 
+          error: 'Failed to trigger compression task',
+          message: error.message 
+        });
+      }
+    });
+
+    // Get scheduler statistics
+    this.app.get('/api/scheduler/stats', (req, res) => {
+      res.json(this.scheduler.getStats());
+    });
+  }
+
+  /**
+   * Setup common routes available in both modes
+   */
+  setupCommonRoutes() {
+    // System statistics
+    this.app.get('/api/stats', async (req, res) => {
+      try {
+        const dbStats = await this.databaseService.getStats();
+        const queueStatus = this.databaseService.getQueueStatus();
+        
+        const systemStats = {
+          ...this.stats,
+          uptime: Date.now() - this.stats.startTime,
+          database: dbStats,
+          writeQueue: queueStatus,
+          nodeType: this.config.nodeType,
+          scheduler: this.config.isMaster() ? this.scheduler.getStats() : null
+        };
+
+        res.json(systemStats);
+        
+      } catch (error) {
+        console.error('Error fetching stats:', error);
+        res.status(500).json({ 
+          error: 'Failed to fetch stats',
+          message: error.message 
+        });
+      }
+    });
+
+    // Get recent container data (master only functionality but available for compatibility)
     this.app.get('/api/containers', async (req, res) => {
+      if (this.config.isSlave()) {
+        return res.status(403).json({ 
+          error: 'Container data access not available in slave mode' 
+        });
+      }
+
       try {
         const limit = parseInt(req.query.limit) || 100;
         const offset = parseInt(req.query.offset) || 0;
@@ -241,215 +426,18 @@ class MaritimeServer {
         });
       }
     });
+  }
 
-    // Get specific container data
-    this.app.get('/api/containers/:containerId', async (req, res) => {
-      try {
-        const { containerId } = req.params;
-        const limit = parseInt(req.query.limit) || 50;
-        
-        const rows = await this.databaseService.getContainerData(containerId, limit);
-        
-        const containerHistory = await Promise.all(rows.map(async (row) => {
-          try {
-            const decompressedData = await this.compressionService.decompress(row.compressed_data);
-            return {
-              timestamp: row.timestamp,
-              data: decompressedData
-            };
-          } catch (error) {
-            console.error('Error decompressing data:', error);
-            return {
-              timestamp: row.timestamp,
-              error: 'Failed to decompress data'
-            };
-          }
-        }));
-
-        res.json({ 
-          containerId, 
-          history: containerHistory,
-          total: containerHistory.length 
-        });
-        
-      } catch (error) {
-        console.error('Error fetching container history:', error);
-        res.status(500).json({ 
-          error: 'Failed to fetch container history',
-          message: error.message 
-        });
-      }
-    });
-
-    // System statistics
-    this.app.get('/api/stats', async (req, res) => {
-      try {
-        const dbStats = await this.databaseService.getStats();
-        const queueStatus = this.databaseService.getQueueStatus();
-        
-        const systemStats = {
-          ...this.stats,
-          uptime: Date.now() - this.stats.startTime,
-          database: dbStats,
-          writeQueue: queueStatus
-        };
-
-        res.json(systemStats);
-        
-      } catch (error) {
-        console.error('Error fetching stats:', error);
-        res.status(500).json({ 
-          error: 'Failed to fetch statistics',
-          message: error.message 
-        });
-      }
-    });
-
-    // Queue performance metrics (detailed)
-    this.app.get('/api/queue/metrics', (req, res) => {
-      try {
-        const performanceMetrics = this.databaseService.getPerformanceMetrics();
-        const queueStatus = this.databaseService.getQueueStatus();
-        
-        res.json({
-          queue: queueStatus,
-          performance: performanceMetrics,
-          server: {
-            totalRequests: this.stats.totalRequests,
-            successfulWrites: this.stats.successfulWrites,
-            errors: this.stats.errors,
-            uptime: Date.now() - this.stats.startTime,
-            errorRate: this.stats.totalRequests > 0 ? 
-              ((this.stats.errors / this.stats.totalRequests) * 100).toFixed(2) + '%' : '0%'
-          }
-        });
-      } catch (error) {
-        console.error('Error fetching queue metrics:', error);
-        res.status(500).json({ 
-          error: 'Failed to fetch queue metrics',
-          message: error.message 
-        });
-      }
-    });
-
-    // Force process queue (for testing/maintenance)
-    this.app.post('/api/queue/process', async (req, res) => {
-      try {
-        const result = await this.databaseService.forceProcessQueue();
-        const queueStatus = this.databaseService.getQueueStatus();
-        
-        res.json({
-          success: true,
-          processed: result.processed,
-          message: `Force processed ${result.processed} queued items`,
-          queue: queueStatus
-        });
-      } catch (error) {
-        console.error('Error force processing queue:', error);
-        res.status(500).json({ 
-          error: 'Failed to force process queue',
-          message: error.message 
-        });
-      }
-    });
-
-    // Reset metrics (for testing)
-    this.app.post('/api/queue/reset-metrics', (req, res) => {
-      try {
-        this.databaseService.resetMetrics();
-        
-        // Reset server stats too
-        this.stats = {
-          totalRequests: 0,
-          successfulWrites: 0,
-          errors: 0,
-          startTime: Date.now()
-        };
-        
-        res.json({
-          success: true,
-          message: 'All metrics have been reset'
-        });
-      } catch (error) {
-        console.error('Error resetting metrics:', error);
-        res.status(500).json({ 
-          error: 'Failed to reset metrics',
-          message: error.message 
-        });
-      }
-    });
-
-    // Health check
-    this.app.get('/api/health', (req, res) => {
-      const queueStatus = this.databaseService.getQueueStatus();
-      const health = {
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        uptime: Date.now() - this.stats.startTime,
-        queue: queueStatus.queue,
-        memoryUsage: process.memoryUsage()
-      };
-
-      res.json(health);
-    });
-
-    // Database maintenance endpoints
-    this.app.get('/api/database/info', async (req, res) => {
-      try {
-        const dbInfo = await this.databaseService.getDatabaseInfo();
-        res.json(dbInfo);
-      } catch (error) {
-        console.error('Error fetching database info:', error);
-        res.status(500).json({ 
-          error: 'Failed to fetch database info',
-          message: error.message 
-        });
-      }
-    });
-
-    this.app.post('/api/database/cleanup', async (req, res) => {
-      try {
-        const daysToKeep = parseInt(req.body.daysToKeep) || 30;
-        const deletedRecords = await this.databaseService.cleanupOldRecords(daysToKeep);
-        
-        res.json({ 
-          success: true,
-          deletedRecords,
-          daysToKeep,
-          message: `Cleaned up ${deletedRecords} records older than ${daysToKeep} days`
-        });
-      } catch (error) {
-        console.error('Error cleaning up database:', error);
-        res.status(500).json({ 
-          error: 'Failed to cleanup database',
-          message: error.message 
-        });
-      }
-    });
-
-    this.app.post('/api/database/optimize', async (req, res) => {
-      try {
-        await this.databaseService.optimizeDatabase();
-        const dbInfo = await this.databaseService.getDatabaseInfo();
-        
-        res.json({ 
-          success: true,
-          message: 'Database optimization completed',
-          databaseInfo: dbInfo
-        });
-      } catch (error) {
-        console.error('Error optimizing database:', error);
-        res.status(500).json({ 
-          error: 'Failed to optimize database',
-          message: error.message 
-        });
-      }
-    });
-
-    // 404 handler
-    this.app.use('*', (req, res) => {
-      res.status(404).json({ error: 'Endpoint not found' });
-    });
+  /**
+   * Helper to format bytes into a human-readable string
+   */
+  formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
   }
 
   /**
@@ -457,11 +445,18 @@ class MaritimeServer {
    */
   start() {
     this.app.listen(this.port, () => {
-      console.log(`\n🚢 Maritime Container Server running on port ${this.port}`);
+      console.log(`\n🚢 Maritime Container Server running on port ${this.port} (${this.config.nodeType} mode)`);
       console.log(`📊 Dashboard: http://localhost:${this.port}`);
       console.log(`🔌 API: http://localhost:${this.port}/api`);
       console.log(`💾 Database: SQLite with Brotli compression`);
-      console.log(`⚡ Ready to handle 300+ containers/second\n`);
+      if (this.config.isMaster()) {
+        console.log(`📤 Send to: ${this.config.getSendToUrl()}`);
+        console.log(`⏰ Compression schedule: every ${this.config.compressionScheduleHours} hours`);
+      }
+      if (this.config.isSlave()) {
+        console.log(`📨 Forward to: ${this.config.getForwardToUrl()}`);
+      }
+      console.log(`⚡ Ready to handle maritime container data\n`);
     });
   }
 
@@ -470,6 +465,9 @@ class MaritimeServer {
    */
   async shutdown() {
     console.log('Shutting down server...');
+    if (this.scheduler) {
+      this.scheduler.stop();
+    }
     await this.databaseService.close();
     process.exit(0);
   }
@@ -495,4 +493,4 @@ if (require.main === module) {
   server.initialize();
 }
 
-module.exports = MaritimeServer;
+module.exports = MaritimeServer; 

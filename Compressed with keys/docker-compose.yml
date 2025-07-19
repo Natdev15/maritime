@@ -1,14 +1,34 @@
 version: '3.8'
 
 services:
-  maritime-tracker:
+  # EXAMPLE: Master Node Configuration
+  # Uncomment and configure this section for master node
+  maritime-master:
     build: .
     ports:
       - "3000:3000"
     volumes:
-      # Mount data directory for database persistence
       - ./data:/app/data
     environment:
-      - NODE_ENV=production
+      - NODE_TYPE=master
+      - SEND_TO_URL=http://maritime-slave:3000/api/receive-compressed
+      - COMPRESSION_SCHEDULE_HOURS=6
       - PORT=3000
-    restart: unless-stopped 
+    restart: unless-stopped
+
+  # EXAMPLE: Slave Node Configuration  
+  # Uncomment and configure this section for slave node
+  # maritime-slave:
+  #   build: .
+  #   ports:
+  #     - "3001:3000"
+  #   volumes:
+  #     - slave_data:/app/data
+  #   environment:
+  #     - NODE_TYPE=slave
+  #     - FORWARD_TO_URL=http://datacenter.example.com:8080/api/container-data
+  #     - PORT=3000
+  #   restart: unless-stopped
+
+volumes:
+  slave_data: 

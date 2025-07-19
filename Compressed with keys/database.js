@@ -383,6 +383,110 @@ class DatabaseService {
   }
 
   /**
+   * Get all container data for bulk operations (used by master for scheduled compression)
+   * @param {number} batchSize - Number of records to fetch at a time to avoid memory issues
+   */
+  async getAllContainerData(batchSize = 10000) {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        SELECT id, container_id, timestamp, compressed_data
+        FROM container_data
+        ORDER BY timestamp ASC
+      `;
+
+      this.db.all(sql, [], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          // Convert Unix timestamp back to ISO string for compatibility
+          const processedRows = rows.map(row => ({
+            ...row,
+            timestamp: new Date(row.timestamp).toISOString()
+          }));
+          
+          console.log(`📦 Retrieved ${processedRows.length} container records for bulk operation`);
+          resolve(processedRows);
+        }
+      });
+    });
+  }
+
+  /**
+   * Get all container data in batches to handle large datasets efficiently
+   * @param {number} batchSize - Number of records per batch
+   * @param {function} batchCallback - Callback function called for each batch
+   */
+  async getAllContainerDataInBatches(batchSize = 5000, batchCallback) {
+    return new Promise((resolve, reject) => {
+      let offset = 0;
+      let totalProcessed = 0;
+      
+      const processBatch = () => {
+        const sql = `
+          SELECT id, container_id, timestamp, compressed_data
+          FROM container_data
+          ORDER BY timestamp ASC
+          LIMIT ? OFFSET ?
+        `;
+
+        this.db.all(sql, [batchSize, offset], async (err, rows) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          if (rows.length === 0) {
+            // No more data
+            console.log(`✅ Completed processing all ${totalProcessed} container records`);
+            resolve(totalProcessed);
+            return;
+          }
+
+          // Convert timestamps
+          const processedRows = rows.map(row => ({
+            ...row,
+            timestamp: new Date(row.timestamp).toISOString()
+          }));
+
+          totalProcessed += processedRows.length;
+          console.log(`📦 Processing batch: ${processedRows.length} records (total: ${totalProcessed})`);
+
+          try {
+            // Call the batch callback
+            await batchCallback(processedRows, totalProcessed);
+            
+            // Process next batch
+            offset += batchSize;
+            setImmediate(processBatch); // Use setImmediate to avoid stack overflow
+          } catch (callbackError) {
+            reject(callbackError);
+          }
+        });
+      };
+
+      processBatch();
+    });
+  }
+
+  /**
+   * Delete all container data (used after successful transmission to slave)
+   */
+  async deleteAllContainerData() {
+    return new Promise((resolve, reject) => {
+      const sql = `DELETE FROM container_data`;
+      
+      this.db.run(sql, [], function(err) {
+        if (err) {
+          reject(err);
+        } else {
+          console.log(`🗑️ Deleted all ${this.changes} container records after successful transmission`);
+          resolve(this.changes);
+        }
+      });
+    });
+  }
+
+  /**
    * Clean up old records to manage database size
    * @param {number} daysToKeep - Number of days of data to keep
    */
