@@ -3,7 +3,7 @@ const path = require('path');
 
 class DatabaseService {
   constructor() {
-    this.dbPath = path.join(__dirname, 'maritime_containers.db');
+    this.dbPath = path.join(__dirname, 'data', 'maritime_containers.db');
     this.db = null;
     
     // Queue-based batching system for high throughput
@@ -386,7 +386,7 @@ class DatabaseService {
    * Clean up old records to manage database size
    * @param {number} daysToKeep - Number of days of data to keep
    */
-  async cleanupOldRecords(daysToKeep = 30) {
+  async cleanupOldRecords(daysToKeep = 7) {
     return new Promise((resolve, reject) => {
       const cutoffTimestamp = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
       

@@ -29,6 +29,12 @@ class MaritimeServer {
       // Initialize database
       await this.databaseService.initialize();
       
+      // Optimized SQLite settings for containerized environment
+      this.databaseService.db.run('PRAGMA cache_size=-524288;'); // 512MB cache (negative means MB)
+      this.databaseService.db.run('PRAGMA mmap_size=2147483648;'); // 2GB mmap for Docker with sufficient memory
+      this.databaseService.db.run('PRAGMA wal_autocheckpoint=10000;'); // Less frequent checkpoints
+      this.databaseService.db.run('PRAGMA wal_checkpoint_fullfsync=OFF;'); // Faster WAL checkpoints
+      
       // Setup middleware
       this.setupMiddleware();
       
