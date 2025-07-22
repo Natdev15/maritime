@@ -9,7 +9,20 @@ class Config {
     this.sendToUrl = process.env.SEND_TO_URL;
     this.forwardToUrl = process.env.FORWARD_TO_URL;
     this.port = process.env.PORT || 3000;
-    this.compressionScheduleHours = parseInt(process.env.COMPRESSION_SCHEDULE_HOURS) || 6;
+    
+    // Support both minutes and hours for compression schedule
+    // Minutes take priority if both are specified
+    if (process.env.COMPRESSION_SCHEDULE_MINUTES) {
+      this.compressionScheduleMinutes = parseInt(process.env.COMPRESSION_SCHEDULE_MINUTES);
+      this.compressionScheduleHours = this.compressionScheduleMinutes / 60;
+    } else if (process.env.COMPRESSION_SCHEDULE_HOURS) {
+      this.compressionScheduleHours = parseFloat(process.env.COMPRESSION_SCHEDULE_HOURS);
+      this.compressionScheduleMinutes = Math.round(this.compressionScheduleHours * 60);
+    } else {
+      // Default: 6 hours = 360 minutes
+      this.compressionScheduleHours = 6;
+      this.compressionScheduleMinutes = 360;
+    }
     
     // Validate configuration
     this.validateConfig();
@@ -110,7 +123,16 @@ class Config {
     console.log(`🔧 Configuration validated: ${this.nodeType} mode`);
     if (this.isMaster()) {
       console.log(`📤 Will send data to: ${this.sendToUrl}`);
-      console.log(`⏰ Compression schedule: every ${this.compressionScheduleHours} hours`);
+      // Show schedule in a readable format
+      if (this.compressionScheduleMinutes < 60) {
+        console.log(`⏰ Compression schedule: every ${this.compressionScheduleMinutes} minutes`);
+      } else if (this.compressionScheduleMinutes === 60) {
+        console.log(`⏰ Compression schedule: every 1 hour`);
+      } else if (this.compressionScheduleMinutes % 60 === 0) {
+        console.log(`⏰ Compression schedule: every ${this.compressionScheduleMinutes / 60} hours`);
+      } else {
+        console.log(`⏰ Compression schedule: every ${this.compressionScheduleMinutes} minutes (${this.compressionScheduleHours.toFixed(2)} hours)`);
+      }
     }
     if (this.isSlave()) {
       console.log(`📨 Will forward data to: ${this.forwardToUrl}`);
@@ -124,18 +146,18 @@ class Config {
     const errorMessage = [
       '',
       '🚢 Maritime Container Tracker - Configuration Error',
-      '=' .repeat(60),
+      '='.repeat(60),
       '',
       `❌ ${title}`,
       '',
       `📋 ${description}`,
       '',
       '🔧 Setup Instructions:',
-             ...instructions.map(line => `   ${line}`),
-       '',
-       '📖 For more details, see: README.md',
-       '',
-      '=' .repeat(60),
+      ...instructions.map(line => `   ${line}`),
+      '',
+      '📖 For more details, see: README.md',
+      '',
+      '='.repeat(60),
       ''
     ].join('\n');
 
@@ -192,7 +214,7 @@ class Config {
    * Get compression schedule in milliseconds
    */
   getCompressionScheduleMs() {
-    return this.compressionScheduleHours * 60 * 60 * 1000;
+    return this.compressionScheduleMinutes * 60 * 1000;
   }
 
   /**
@@ -205,10 +227,11 @@ class Config {
       isMaster: this.isMaster(),
       isSlave: this.isSlave(),
       compressionScheduleHours: this.compressionScheduleHours,
+      compressionScheduleMinutes: this.compressionScheduleMinutes,
       sendToUrl: this.isMaster() ? this.sendToUrl : null,
       forwardToUrl: this.isSlave() ? this.forwardToUrl : null
     };
   }
 }
 
-module.exports = Config; 
+module.exports = Config;

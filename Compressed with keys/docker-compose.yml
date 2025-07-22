@@ -11,8 +11,8 @@ services:
       - ./data:/app/data
     environment:
       - NODE_TYPE=master
-      - SEND_TO_URL=http://maritime-slave:3000/api/receive-compressed
-      - COMPRESSION_SCHEDULE_HOURS=6
+      - SEND_TO_URL=http://172.25.1.78:3001/api/receive-compressed
+      - COMPRESSION_SCHEDULE_MINUTES=2
       - PORT=3000
     restart: unless-stopped
 

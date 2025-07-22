@@ -15,4 +15,5 @@ tests
 *.log
 maritime_containers.db
 *.db-shm
-*.db-wal 
+*.db-wal
+data
