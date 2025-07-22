@@ -91,6 +91,7 @@ class HttpClient {
 
   /**
    * Forward decompressed data to another endpoint (slave mode)
+   * Each container is sent individually in parallel using M2M format
    * @param {string} url - The target endpoint URL
    * @param {Array} containerData - The decompressed container data array
    * @param {Object} metadata - Additional metadata
@@ -98,31 +99,93 @@ class HttpClient {
   async forwardDecompressedData(url, containerData, metadata = {}) {
     try {
       console.log(`📨 Forwarding decompressed data to: ${url}`);
-      console.log(`📊 Containers: ${containerData.length}`);
+      console.log(`📊 Containers: ${containerData.length} (sending in parallel)`);
       
-      const payload = {
-        containers: containerData,
+      const startTime = Date.now();
+      
+      // Send each container individually in parallel
+      const forwardPromises = containerData.map(async (container, index) => {
+        try {
+          // Extract timestamp from container data or use current timestamp
+          const timestamp = container.data?.timestamp || container.timestamp || new Date().toISOString();
+          
+          // Create M2M format payload
+          const payload = {
+            "m2m:cin": {
+              "con": container.data || container
+            }
+          };
+
+          // Create individual request with specific headers
+          const response = await this.client.post(url, payload, {
+            headers: {
+              'Content-Type': 'application/json;ty=4',
+              'X-M2M-RI': timestamp,
+              'X-M2M-ORIGIN': 'Natesh'
+            }
+          });
+
+          console.log(`✅ Container ${index + 1}/${containerData.length} forwarded (ID: ${container.containerId || container.id})`);
+          
+          return {
+            success: true,
+            containerId: container.containerId || container.id,
+            responseStatus: response.status,
+            index
+          };
+
+        } catch (error) {
+          console.error(`❌ Failed to forward container ${index + 1}: ${error.message}`);
+          
+          return {
+            success: false,
+            containerId: container.containerId || container.id,
+            error: error.message,
+            responseStatus: error.response?.status || null,
+            index
+          };
+        }
+      });
+
+      // Wait for all parallel requests to complete
+      const results = await Promise.all(forwardPromises);
+      
+      // Calculate success/failure statistics
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+      const processingTime = Date.now() - startTime;
+      
+      console.log(`✅ Forwarding completed in ${processingTime}ms:`);
+      console.log(`   📊 Successful: ${successful.length}/${containerData.length}`);
+      if (failed.length > 0) {
+        console.log(`   ❌ Failed: ${failed.length}/${containerData.length}`);
+        // Log first few failures for debugging
+        failed.slice(0, 3).forEach(failure => {
+          console.log(`      - Container ${failure.containerId}: ${failure.error}`);
+        });
+        if (failed.length > 3) {
+          console.log(`      - ... and ${failed.length - 3} more failures`);
+        }
+      }
+      
+      return {
+        success: failed.length === 0, // Success only if all containers were forwarded
+        response: {
+          totalContainers: containerData.length,
+          successfulForwards: successful.length,
+          failedForwards: failed.length,
+          processingTimeMs: processingTime,
+          results: results
+        },
+        forwardedContainers: successful.length,
+        payloadSize: JSON.stringify(containerData).length, // Original payload size
+        responseStatus: failed.length === 0 ? 200 : 207, // 207 for partial success
         metadata: {
           ...metadata,
-          timestamp: new Date().toISOString(),
-          sourceNode: 'slave',
-          containerCount: containerData.length,
-          processedAt: new Date().toISOString()
+          parallelRequests: true,
+          m2mFormat: true,
+          forwardingStrategy: 'individual-parallel'
         }
-      };
-
-      const payloadSize = JSON.stringify(payload).length;
-      console.log(`📊 Payload size: ${this.formatBytes(payloadSize)}`);
-
-      const response = await this.client.post(url, payload);
-      
-      console.log(`✅ Successfully forwarded decompressed data`);
-      return {
-        success: true,
-        response: response.data,
-        forwardedContainers: containerData.length,
-        payloadSize,
-        responseStatus: response.status
       };
 
     } catch (error) {
@@ -132,7 +195,7 @@ class HttpClient {
         success: false,
         error: error.message,
         responseStatus: error.response?.status || null,
-        forwardedContainers: containerData.length
+        forwardedContainers: 0
       };
     }
   }
