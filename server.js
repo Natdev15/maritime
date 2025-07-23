@@ -189,21 +189,26 @@ class MaritimeServer {
             }
           }
         }
-        if (forwardResult.success) {
-          console.log(`✅ Successfully forwarded ${decompressedContainers.length} containers`);
+        // If all failures are alreadyExists (409), treat as success
+        const hasTrueFailures = forwardResult.failedContainers && forwardResult.failedContainers.length > 0;
+        if (!hasTrueFailures) {
+          console.log(`✅ All containers forwarded or already existed (409). Returning 200.`);
           res.json({
             success: true,
-            message: 'Data received, decompressed, and forwarded successfully',
+            message: 'Data received, decompressed, and forwarded successfully (including already existing containers)',
             containersProcessed: decompressedContainers.length,
             forwardResult: {
               status: forwardResult.responseStatus,
               forwardedContainers: forwardResult.forwardedContainers,
               alreadyExistsContainers: forwardResult.alreadyExistsContainers,
-              failedContainers: forwardResult.failedContainers,
+              failedContainers: [],
               results: forwardResult.response.results
             }
           });
-        } else {
+          return;
+        }
+        // If there are true failures, return 500
+        if (hasTrueFailures) {
           console.error('❌ Failed to forward decompressed data:', forwardResult.error);
           res.status(500).json({
             success: false,
@@ -214,6 +219,7 @@ class MaritimeServer {
             failedContainers: forwardResult.failedContainers,
             results: forwardResult.response ? forwardResult.response.results : undefined
           });
+          return;
         }
       } catch (error) {
         this.stats.errors++;
@@ -263,31 +269,46 @@ class MaritimeServer {
     this.app.post('/api/container', async (req, res) => {
       try {
         const containerData = req.body;
-        
         // Validate required fields
         if (!containerData.containerId && !containerData.iso6346) {
           return res.status(400).json({ 
             error: 'Container ID is required (containerId or iso6346)' 
           });
         }
-
         const containerId = containerData.containerId || containerData.iso6346;
-        
         // Compress the data
         const compressedData = await this.compressionService.compress(containerData);
-        
         // Add to queue (returns immediately for fast response)
         const queueResult = await this.databaseService.addToQueue(containerId, compressedData);
-        
         this.stats.successfulWrites++;
-        
-        res.status(201).json({ 
-          success: true, 
-          containerId,
-          compressionRatio: this.compressionService.getCompressionRatio(containerData, compressedData),
-          queue: queueResult
-        });
-        
+        // Immediately send to slave
+        const bulkCompressedData = await this.compressionService.compressMultiple([{ containerId, data: containerData }]);
+        const sendResult = await this.httpClient.sendCompressedData(
+          this.config.getSendToUrl(),
+          bulkCompressedData,
+          {
+            originalSize: JSON.stringify([containerData]).length,
+            compressionRatio: JSON.stringify([containerData]).length / bulkCompressedData.length,
+            containerCount: 1,
+            compressionTimestamp: new Date().toISOString()
+          }
+        );
+        if (sendResult.success) {
+          // Optionally, clear sent data from DB
+          await this.databaseService.deleteContainersByIds([containerId]);
+          res.status(201).json({ 
+            success: true, 
+            containerId,
+            compressionRatio: this.compressionService.getCompressionRatio(containerData, compressedData),
+            queue: queueResult,
+            sentToSlave: true
+          });
+        } else {
+          res.status(500).json({
+            error: 'Failed to send to slave',
+            details: sendResult.error
+          });
+        }
       } catch (error) {
         this.stats.errors++;
         console.error('Error processing container data:', error);
@@ -302,56 +323,40 @@ class MaritimeServer {
     this.app.post('/api/containers/bulk', async (req, res) => {
       try {
         const containers = req.body.containers || req.body;
-        
         if (!Array.isArray(containers)) {
           return res.status(400).json({ error: 'Expected array of containers' });
         }
-
-        const results = [];
-        const errors = [];
-        const startTime = Date.now();
-
-        // Process all containers in parallel for maximum speed
-        const promises = containers.map(async (containerData, index) => {
-          try {
-            const containerId = containerData.containerId || containerData.iso6346;
-            
-            if (!containerId) {
-              errors.push({ index, container: containerData, error: 'Missing container ID' });
-              return null;
-            }
-
-            const compressedData = await this.compressionService.compress(containerData);
-            const queueResult = await this.databaseService.addToQueue(containerId, compressedData);
-            
-            this.stats.successfulWrites++;
-            return { index, containerId, success: true, queue: queueResult };
-            
-          } catch (error) {
-            errors.push({ index, container: containerData, error: error.message });
-            this.stats.errors++;
-            return null;
+        const validContainers = containers.filter(c => c.containerId || c.iso6346);
+        const decompressedContainers = validContainers.map(c => ({
+          containerId: c.containerId || c.iso6346,
+          data: c
+        }));
+        // Compress all valid containers
+        const bulkCompressedData = await this.compressionService.compressMultiple(decompressedContainers);
+        const sendResult = await this.httpClient.sendCompressedData(
+          this.config.getSendToUrl(),
+          bulkCompressedData,
+          {
+            originalSize: JSON.stringify(validContainers).length,
+            compressionRatio: JSON.stringify(validContainers).length / bulkCompressedData.length,
+            containerCount: validContainers.length,
+            compressionTimestamp: new Date().toISOString()
           }
-        });
-
-        // Wait for all processing to complete
-        const allResults = await Promise.all(promises);
-        const successfulResults = allResults.filter(r => r !== null);
-        
-        const processingTime = Date.now() - startTime;
-        const throughput = containers.length / (processingTime / 1000);
-
-        res.json({ 
-          processed: successfulResults.length,
-          errors: errors.length,
-          totalContainers: containers.length,
-          processingTimeMs: processingTime,
-          throughputPerSecond: Math.round(throughput),
-          results: successfulResults.slice(0, 10),
-          errors: errors.slice(0, 5),
-          queue: this.databaseService.getQueueStatus()
-        });
-        
+        );
+        if (sendResult.success) {
+          // Optionally, clear sent data from DB
+          await this.databaseService.deleteContainersByIds(validContainers.map(c => c.containerId || c.iso6346));
+          res.json({ 
+            processed: validContainers.length,
+            sentToSlave: true,
+            sendResult
+          });
+        } else {
+          res.status(500).json({
+            error: 'Failed to send to slave',
+            details: sendResult.error
+          });
+        }
       } catch (error) {
         this.stats.errors++;
         console.error('Error processing bulk container data:', error);
@@ -361,29 +366,7 @@ class MaritimeServer {
         });
       }
     });
-
-    // Manual trigger for compression task (testing purposes)
-    this.app.post('/api/compress-send', async (req, res) => {
-      try {
-        console.log('🔧 Manual compression task triggered');
-        await this.scheduler.forceRun();
-        res.json({ 
-          success: true, 
-          message: 'Compression task triggered successfully' 
-        });
-      } catch (error) {
-        console.error('Manual compression task failed:', error);
-        res.status(500).json({ 
-          error: 'Failed to trigger compression task',
-          message: error.message 
-        });
-      }
-    });
-
-    // Get scheduler statistics
-    this.app.get('/api/scheduler/stats', (req, res) => {
-      res.json(this.scheduler.getStats());
-    });
+    // Remove scheduler and related endpoints
   }
 
   /**

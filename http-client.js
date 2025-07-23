@@ -175,10 +175,9 @@ class HttpClient {
       // Wait for all parallel requests to complete
       const results = await Promise.all(forwardPromises);
       // Calculate success/failure statistics
-      const successful = results.filter(r => r.success);
-      // Only count as failed if not success (409s are success)
-      const failed = results.filter(r => !r.success);
+      const successful = results.filter(r => r.success && !r.alreadyExists);
       const alreadyExists = results.filter(r => r.alreadyExists);
+      const failed = results.filter(r => !r.success && !r.alreadyExists);
       const processingTime = Date.now() - startTime;
       console.log(`✅ Forwarding completed in ${processingTime}ms:`);
       console.log(`   📊 Successful: ${successful.length}/${containerData.length}`);
@@ -195,7 +194,7 @@ class HttpClient {
         }
       }
       return {
-        success: failed.length === 0, // Success only if all containers were forwarded or already existed
+        success: failed.length === 0, // Success if all containers were forwarded or already existed
         response: {
           totalContainers: containerData.length,
           successfulForwards: successful.length,
