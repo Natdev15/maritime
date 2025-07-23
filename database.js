@@ -81,6 +81,16 @@ class DatabaseService {
 
         CREATE INDEX IF NOT EXISTS idx_container_id ON container_data(container_id);
         CREATE INDEX IF NOT EXISTS idx_timestamp ON container_data(timestamp);
+        -- Table for persistent retry of failed forwards
+        CREATE TABLE IF NOT EXISTS failed_forwards (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          container_id TEXT NOT NULL,
+          timestamp INTEGER NOT NULL,
+          data TEXT NOT NULL,
+          last_attempt INTEGER,
+          fail_count INTEGER DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_failed_container_id ON failed_forwards(container_id);
       `;
 
       this.db.exec(createTableSQL, (err) => {
@@ -255,6 +265,69 @@ class DatabaseService {
             }
           });
         });
+      });
+    });
+  }
+
+  /**
+   * Add a failed forward to the persistent retry table
+   * @param {Object} container {containerId, timestamp, data}
+   */
+  async addFailedForward(container) {
+    return new Promise((resolve, reject) => {
+      const sql = `INSERT INTO failed_forwards (container_id, timestamp, data, last_attempt, fail_count)
+                   VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT(container_id) DO UPDATE SET fail_count = fail_count + 1, last_attempt = ?`;
+      const now = Date.now();
+      this.db.run(sql, [container.containerId, new Date(container.timestamp).getTime(), JSON.stringify(container.data), now, now], function(err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.lastID);
+        }
+      });
+    });
+  }
+
+  /**
+   * Get all failed forwards (for retry)
+   */
+  async getAllFailedForwards(limit = 100) {
+    return new Promise((resolve, reject) => {
+      const sql = `SELECT id, container_id, timestamp, data, last_attempt, fail_count FROM failed_forwards ORDER BY last_attempt ASC LIMIT ?`;
+      this.db.all(sql, [limit], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          // Parse JSON data
+          const containers = rows.map(row => ({
+            id: row.id,
+            containerId: row.container_id,
+            timestamp: new Date(row.timestamp).toISOString(),
+            data: JSON.parse(row.data),
+            lastAttempt: row.last_attempt,
+            failCount: row.fail_count
+          }));
+          resolve(containers);
+        }
+      });
+    });
+  }
+
+  /**
+   * Delete failed forwards by their DB ids
+   */
+  async deleteFailedForwardsByIds(ids) {
+    if (!ids || ids.length === 0) return 0;
+    return new Promise((resolve, reject) => {
+      const placeholders = ids.map(() => '?').join(',');
+      const sql = `DELETE FROM failed_forwards WHERE id IN (${placeholders})`;
+      this.db.run(sql, ids, function(err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.changes);
+        }
       });
     });
   }
@@ -480,6 +553,25 @@ class DatabaseService {
           reject(err);
         } else {
           console.log(`🗑️ Deleted all ${this.changes} container records after successful transmission`);
+          resolve(this.changes);
+        }
+      });
+    });
+  }
+
+  /**
+   * Delete containers by their IDs (used after partial success)
+   * @param {string[]} containerIds
+   */
+  async deleteContainersByIds(containerIds) {
+    if (!containerIds || containerIds.length === 0) return 0;
+    return new Promise((resolve, reject) => {
+      const placeholders = containerIds.map(() => '?').join(',');
+      const sql = `DELETE FROM container_data WHERE container_id IN (${placeholders})`;
+      this.db.run(sql, containerIds, function(err) {
+        if (err) {
+          reject(err);
+        } else {
           resolve(this.changes);
         }
       });

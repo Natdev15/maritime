@@ -14,16 +14,22 @@
     "setup-help": "bash start-examples.sh help"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "sqlite3": "^5.1.6",
+    "axios": "^1.10.0",
     "cors": "^2.8.5",
+    "express": "^4.18.2",
     "helmet": "^7.1.0",
-    "axios": "^1.6.0"
+    "sqlite3": "^5.1.6"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
   },
-  "keywords": ["maritime", "container", "tracking", "brotli", "sqlite"],
+  "keywords": [
+    "maritime",
+    "container",
+    "tracking",
+    "brotli",
+    "sqlite"
+  ],
   "author": "",
   "license": "ISC"
-} 
+}

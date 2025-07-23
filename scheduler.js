@@ -75,30 +75,23 @@ class Scheduler {
       console.log('⏳ Compression task already running, skipping this cycle');
       return;
     }
-
     this.isRunning = true;
     const startTime = Date.now();
-    
     try {
       console.log(`\n🔄 Starting scheduled compression task at ${new Date().toISOString()}`);
-      
       // Step 1: Get all container data from database
       console.log('📦 Retrieving all container data from database...');
-      const allContainerData = await this.databaseService.getAllContainerData();
-      
+      let allContainerData = await this.databaseService.getAllContainerData();
       if (allContainerData.length === 0) {
         console.log('📭 No container data found in database, skipping compression');
         this.stats.totalRuns++;
         this.stats.successfulRuns++;
         return;
       }
-
       console.log(`📊 Found ${allContainerData.length} container records`);
-
       // Step 2: Decompress all data to get original JSON
       console.log('🔓 Decompressing container data...');
-      const decompressedContainers = [];
-      
+      let decompressedContainers = [];
       for (let i = 0; i < allContainerData.length; i++) {
         const record = allContainerData[i];
         try {
@@ -111,28 +104,21 @@ class Scheduler {
           });
         } catch (error) {
           console.error(`❌ Failed to decompress record ${record.id}:`, error.message);
-          // Continue with other records
         }
       }
-
       console.log(`✅ Successfully decompressed ${decompressedContainers.length}/${allContainerData.length} records`);
-
       // Step 3: Compress all decompressed data together for efficient transmission
       console.log('🗜️ Compressing all data for transmission...');
-      const bulkCompressedData = await this.compressionService.compressMultiple(decompressedContainers);
-      
+      let bulkCompressedData = await this.compressionService.compressMultiple(decompressedContainers);
       const originalSize = JSON.stringify(decompressedContainers).length;
       const compressedSize = bulkCompressedData.length;
       const compressionRatio = originalSize / compressedSize;
-      
       console.log(`📊 Compression complete:`);
       console.log(`   Original size: ${this.formatBytes(originalSize)}`);
       console.log(`   Compressed size: ${this.formatBytes(compressedSize)}`);
       console.log(`   Compression ratio: ${compressionRatio.toFixed(2)}:1`);
-
       // Step 4: Send compressed data to slave
-      console.log('📤 Sending compressed data to slave...');
-      const sendResult = await this.httpClient.sendCompressedData(
+      let sendResult = await this.httpClient.sendCompressedData(
         this.config.getSendToUrl(),
         bulkCompressedData,
         {
@@ -142,27 +128,37 @@ class Scheduler {
           compressionTimestamp: new Date().toISOString()
         }
       );
-
-      if (sendResult.success) {
-        console.log(`✅ Successfully sent compressed data to slave`);
-        console.log(`📊 Sent ${this.formatBytes(sendResult.sentBytes)} to ${this.config.getSendToUrl()}`);
-        
-        // Step 5: Delete all data from database after successful transmission
-        console.log('🗑️ Cleaning up database after successful transmission...');
-        try {
-          const deletedCount = await this.databaseService.deleteAllContainerData();
-          console.log(`✅ Database cleanup complete: ${deletedCount} records deleted`);
-          
-          // Update cleanup statistics
-          this.stats.totalDataCleaned += deletedCount;
-          this.stats.cleanupOperations++;
-        } catch (cleanupError) {
-          console.error('❌ Failed to cleanup database after transmission:', cleanupError.message);
-          // Don't fail the whole process for cleanup errors
+      // If sendResult is not fully successful, try to parse failed containers from slave's response
+      let failedContainerIds = [];
+      if (!sendResult.success && sendResult.response && sendResult.response.failedContainers) {
+        failedContainerIds = sendResult.response.failedContainers;
+      }
+      // If sendResult is partially successful (207), also check for failed containers
+      if (sendResult.responseStatus === 207 && sendResult.response && sendResult.response.failedContainers) {
+        failedContainerIds = sendResult.response.failedContainers;
+      }
+      if (sendResult.success || (sendResult.responseStatus === 207 && failedContainerIds.length < decompressedContainers.length)) {
+        // Delete only successfully forwarded containers
+        const successfulContainerIds = decompressedContainers
+          .map(c => c.containerId)
+          .filter(id => !failedContainerIds.includes(id));
+        if (successfulContainerIds.length > 0) {
+          console.log(`🗑️ Cleaning up ${successfulContainerIds.length} successfully forwarded containers from database...`);
+          try {
+            await this.databaseService.deleteContainersByIds(successfulContainerIds);
+            console.log(`✅ Database cleanup complete: ${successfulContainerIds.length} records deleted`);
+            this.stats.totalDataCleaned += successfulContainerIds.length;
+            this.stats.cleanupOperations++;
+          } catch (cleanupError) {
+            console.error('❌ Failed to cleanup database after transmission:', cleanupError.message);
+          }
         }
-        
-        // Update statistics
-        this.stats.successfulRuns++;
+        // Retain only failed containers for next retry
+        if (failedContainerIds.length > 0) {
+          console.warn(`⚠️  ${failedContainerIds.length} containers failed to forward. Retaining for next retry. IDs:`, failedContainerIds);
+        } else {
+          this.stats.successfulRuns++;
+        }
         this.stats.totalDataSent += sendResult.sentBytes;
         this.stats.totalContainersProcessed += decompressedContainers.length;
       } else {
@@ -170,9 +166,7 @@ class Scheduler {
         console.log('📦 Data retained in database due to failed transmission');
         this.stats.failedRuns++;
       }
-
       this.stats.totalRuns++;
-      
     } catch (error) {
       console.error('❌ Compression task failed:', error);
       this.stats.totalRuns++;
@@ -182,7 +176,6 @@ class Scheduler {
       this.stats.lastRunDuration = duration;
       this.lastRun = new Date().toISOString();
       this.isRunning = false;
-      
       console.log(`⏱️ Compression task completed in ${duration}ms`);
       console.log(`📊 Next run scheduled in ${this.config.compressionScheduleHours} hours\n`);
     }

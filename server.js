@@ -155,24 +155,18 @@ class MaritimeServer {
     this.app.post('/api/receive-compressed', async (req, res) => {
       try {
         const { compressedData, metadata } = req.body;
-        
         if (!compressedData) {
           return res.status(400).json({ error: 'Missing compressedData in request body' });
         }
-
         console.log(`📨 Received compressed data from master`);
         console.log(`📊 Metadata:`, metadata);
-
         // Convert base64 back to buffer
         const compressedBuffer = Buffer.from(compressedData, 'base64');
         console.log(`📊 Compressed data size: ${this.formatBytes(compressedBuffer.length)}`);
-
         // Decompress the data
         console.log('🔓 Decompressing received data...');
         const decompressedContainers = await this.compressionService.decompressMultiple(compressedBuffer);
-        
         console.log(`✅ Successfully decompressed ${decompressedContainers.length} containers`);
-
         // Forward decompressed data to target endpoint
         console.log('📨 Forwarding decompressed data...');
         const forwardResult = await this.httpClient.forwardDecompressedData(
@@ -184,7 +178,17 @@ class MaritimeServer {
             decompressedContainerCount: decompressedContainers.length
           }
         );
-
+        // Log and store failed containers for retry
+        if (forwardResult.failedContainers && forwardResult.failedContainers.length > 0) {
+          console.warn(`⚠️  ${forwardResult.failedContainers.length} containers failed to forward. IDs:`, forwardResult.failedContainers);
+          // Store failed containers for persistent retry
+          for (const failedId of forwardResult.failedContainers) {
+            const failed = decompressedContainers.find(c => c.containerId === failedId);
+            if (failed) {
+              await this.databaseService.addFailedForward(failed);
+            }
+          }
+        }
         if (forwardResult.success) {
           console.log(`✅ Successfully forwarded ${decompressedContainers.length} containers`);
           res.json({
@@ -193,7 +197,10 @@ class MaritimeServer {
             containersProcessed: decompressedContainers.length,
             forwardResult: {
               status: forwardResult.responseStatus,
-              forwardedContainers: forwardResult.forwardedContainers
+              forwardedContainers: forwardResult.forwardedContainers,
+              alreadyExistsContainers: forwardResult.alreadyExistsContainers,
+              failedContainers: forwardResult.failedContainers,
+              results: forwardResult.response.results
             }
           });
         } else {
@@ -202,10 +209,12 @@ class MaritimeServer {
             success: false,
             error: 'Failed to forward decompressed data',
             details: forwardResult.error,
-            containersProcessed: decompressedContainers.length
+            containersProcessed: decompressedContainers.length,
+            alreadyExistsContainers: forwardResult.alreadyExistsContainers,
+            failedContainers: forwardResult.failedContainers,
+            results: forwardResult.response ? forwardResult.response.results : undefined
           });
         }
-
       } catch (error) {
         this.stats.errors++;
         console.error('❌ Error processing compressed data:', error);
@@ -216,6 +225,32 @@ class MaritimeServer {
         });
       }
     });
+
+    // Background job: Retry failed forwards every 2 minutes
+    setInterval(async () => {
+      try {
+        const failed = await this.databaseService.getAllFailedForwards(100);
+        if (failed.length === 0) return;
+        console.log(`🔄 Retrying ${failed.length} failed forwards to Mobius...`);
+        const retryResult = await this.httpClient.forwardDecompressedData(
+          this.config.getForwardToUrl(),
+          failed,
+          { retry: true, batchSize: failed.length, timestamp: new Date().toISOString() }
+        );
+        // Remove successfully forwarded or 409 containers from failed_forwards
+        if (retryResult && retryResult.response && retryResult.response.results) {
+          const succeededIds = retryResult.response.results
+            .filter(r => r.success)
+            .map((r, i) => failed[i].id);
+          if (succeededIds.length > 0) {
+            await this.databaseService.deleteFailedForwardsByIds(succeededIds);
+            console.log(`✅ Removed ${succeededIds.length} successfully retried containers from failed_forwards.`);
+          }
+        }
+      } catch (err) {
+        console.error('❌ Error during persistent retry of failed forwards:', err);
+      }
+    }, 2 * 60 * 1000); // every 2 minutes
   }
 
   /**

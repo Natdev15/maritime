@@ -97,69 +97,96 @@ class HttpClient {
    * @param {Object} metadata - Additional metadata
    */
   async forwardDecompressedData(url, containerData, metadata = {}) {
+    const maxRetries = 3;
+    const baseDelay = 500; // ms
     try {
       console.log(`📨 Forwarding decompressed data to: ${url}`);
       console.log(`📊 Containers: ${containerData.length} (sending in parallel)`);
-      
       const startTime = Date.now();
-      
       // Send each container individually in parallel
       const forwardPromises = containerData.map(async (container, index) => {
-        try {
-          // Extract timestamp from container data or use current timestamp
-          const timestamp = container.data?.timestamp || container.timestamp || new Date().toISOString();
-          
-          // Create M2M format payload
-          const payload = {
-            "m2m:cin": {
-              "con": container.data || container
+        let attempt = 0;
+        let lastError = null;
+        let responseStatus = null;
+        const containerId = container.containerId || container.id;
+        while (attempt <= maxRetries) {
+          try {
+            const timestamp = container.data?.timestamp || container.timestamp || new Date().toISOString();
+            const payload = {
+              "m2m:cin": {
+                "con": container.data || container
+              }
+            };
+            const response = await this.client.post(url, payload, {
+              headers: {
+                'Content-Type': 'application/json;ty=4',
+                'X-M2M-RI': timestamp,
+                'X-M2M-ORIGIN': 'Natesh'
+              }
+            });
+            responseStatus = response.status;
+            // Treat 2xx and 409 as success
+            if (response.status >= 200 && response.status < 300) {
+              console.log(`✅ Container ${index + 1}/${containerData.length} forwarded (ID: ${containerId})`);
+              return {
+                success: true,
+                containerId,
+                responseStatus: response.status,
+                index
+              };
             }
-          };
-
-          // Create individual request with specific headers
-          const response = await this.client.post(url, payload, {
-            headers: {
-              'Content-Type': 'application/json;ty=4',
-              'X-M2M-RI': timestamp,
-              'X-M2M-ORIGIN': 'Natesh'
+          } catch (error) {
+            responseStatus = error.response?.status || null;
+            lastError = error;
+            // Treat 409 as idempotent success
+            if (responseStatus === 409) {
+              console.log(`⚠️  Container ${index + 1}/${containerData.length} already exists (ID: ${containerId}) - treating as success`);
+              return {
+                success: true,
+                containerId,
+                responseStatus: 409,
+                index,
+                alreadyExists: true
+              };
             }
-          });
-
-          console.log(`✅ Container ${index + 1}/${containerData.length} forwarded (ID: ${container.containerId || container.id})`);
-          
-          return {
-            success: true,
-            containerId: container.containerId || container.id,
-            responseStatus: response.status,
-            index
-          };
-
-        } catch (error) {
-          console.error(`❌ Failed to forward container ${index + 1}: ${error.message}`);
-          
-          return {
-            success: false,
-            containerId: container.containerId || container.id,
-            error: error.message,
-            responseStatus: error.response?.status || null,
-            index
-          };
+            // Retry only on network/5xx errors
+            if (!responseStatus || (responseStatus >= 500 && responseStatus < 600)) {
+              attempt++;
+              if (attempt > maxRetries) break;
+              const delay = baseDelay * Math.pow(2, attempt - 1);
+              console.log(`🔁 Retry ${attempt} for container ${containerId} after ${delay}ms (error: ${error.message})`);
+              await new Promise(res => setTimeout(res, delay));
+              continue;
+            } else {
+              // For 4xx (except 409), do not retry
+              break;
+            }
+          }
         }
+        console.error(`❌ Failed to forward container ${index + 1}: ${lastError ? lastError.message : 'Unknown error'}`);
+        return {
+          success: false,
+          containerId,
+          error: lastError ? lastError.message : 'Unknown error',
+          responseStatus,
+          index
+        };
       });
-
       // Wait for all parallel requests to complete
       const results = await Promise.all(forwardPromises);
-      
       // Calculate success/failure statistics
       const successful = results.filter(r => r.success);
+      // Only count as failed if not success (409s are success)
       const failed = results.filter(r => !r.success);
+      const alreadyExists = results.filter(r => r.alreadyExists);
       const processingTime = Date.now() - startTime;
-      
       console.log(`✅ Forwarding completed in ${processingTime}ms:`);
       console.log(`   📊 Successful: ${successful.length}/${containerData.length}`);
+      if (alreadyExists.length > 0) {
+        console.log(`   ⚠️  Already exists (409, treated as success): ${alreadyExists.length}`);
+      }
       if (failed.length > 0) {
         console.log(`   ❌ Failed: ${failed.length}/${containerData.length}`);
-        // Log first few failures for debugging
         failed.slice(0, 3).forEach(failure => {
           console.log(`      - Container ${failure.containerId}: ${failure.error}`);
         });
@@ -167,17 +194,19 @@ class HttpClient {
           console.log(`      - ... and ${failed.length - 3} more failures`);
         }
       }
-      
       return {
-        success: failed.length === 0, // Success only if all containers were forwarded
+        success: failed.length === 0, // Success only if all containers were forwarded or already existed
         response: {
           totalContainers: containerData.length,
           successfulForwards: successful.length,
+          alreadyExists: alreadyExists.length,
           failedForwards: failed.length,
           processingTimeMs: processingTime,
           results: results
         },
         forwardedContainers: successful.length,
+        alreadyExistsContainers: alreadyExists.map(a => a.containerId),
+        failedContainers: failed.map(f => f.containerId),
         payloadSize: JSON.stringify(containerData).length, // Original payload size
         responseStatus: failed.length === 0 ? 200 : 207, // 207 for partial success
         metadata: {
@@ -187,10 +216,8 @@ class HttpClient {
           forwardingStrategy: 'individual-parallel'
         }
       };
-
     } catch (error) {
       console.error(`❌ Failed to forward decompressed data:`, error.message);
-      
       return {
         success: false,
         error: error.message,
