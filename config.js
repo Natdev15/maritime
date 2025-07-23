@@ -4,27 +4,12 @@
  */
 class Config {
   constructor() {
-    // Load environment variables
-    this.nodeType = process.env.NODE_TYPE?.toLowerCase();
+    this.nodeType = process.env.NODE_TYPE;
+    this.port = parseInt(process.env.PORT) || 3000;
     this.sendToUrl = process.env.SEND_TO_URL;
     this.forwardToUrl = process.env.FORWARD_TO_URL;
-    this.port = process.env.PORT || 3000;
     
-    // Support both minutes and hours for compression schedule
-    // Minutes take priority if both are specified
-    if (process.env.COMPRESSION_SCHEDULE_MINUTES) {
-      this.compressionScheduleMinutes = parseInt(process.env.COMPRESSION_SCHEDULE_MINUTES);
-      this.compressionScheduleHours = this.compressionScheduleMinutes / 60;
-    } else if (process.env.COMPRESSION_SCHEDULE_HOURS) {
-      this.compressionScheduleHours = parseFloat(process.env.COMPRESSION_SCHEDULE_HOURS);
-      this.compressionScheduleMinutes = Math.round(this.compressionScheduleHours * 60);
-    } else {
-      // Default: 6 hours = 360 minutes
-      this.compressionScheduleHours = 6;
-      this.compressionScheduleMinutes = 360;
-    }
-    
-    // Validate configuration
+    // Validate configuration on startup
     this.validateConfig();
   }
 
@@ -123,16 +108,6 @@ class Config {
     console.log(`🔧 Configuration validated: ${this.nodeType} mode`);
     if (this.isMaster()) {
       console.log(`📤 Will send data to: ${this.sendToUrl}`);
-      // Show schedule in a readable format
-      if (this.compressionScheduleMinutes < 60) {
-        console.log(`⏰ Compression schedule: every ${this.compressionScheduleMinutes} minutes`);
-      } else if (this.compressionScheduleMinutes === 60) {
-        console.log(`⏰ Compression schedule: every 1 hour`);
-      } else if (this.compressionScheduleMinutes % 60 === 0) {
-        console.log(`⏰ Compression schedule: every ${this.compressionScheduleMinutes / 60} hours`);
-      } else {
-        console.log(`⏰ Compression schedule: every ${this.compressionScheduleMinutes} minutes (${this.compressionScheduleHours.toFixed(2)} hours)`);
-      }
     }
     if (this.isSlave()) {
       console.log(`📨 Will forward data to: ${this.forwardToUrl}`);
@@ -211,13 +186,6 @@ class Config {
   }
 
   /**
-   * Get compression schedule in milliseconds
-   */
-  getCompressionScheduleMs() {
-    return this.compressionScheduleMinutes * 60 * 1000;
-  }
-
-  /**
    * Get configuration summary
    */
   getSummary() {
@@ -226,8 +194,6 @@ class Config {
       port: this.port,
       isMaster: this.isMaster(),
       isSlave: this.isSlave(),
-      compressionScheduleHours: this.compressionScheduleHours,
-      compressionScheduleMinutes: this.compressionScheduleMinutes,
       sendToUrl: this.isMaster() ? this.sendToUrl : null,
       forwardToUrl: this.isSlave() ? this.forwardToUrl : null
     };

@@ -6,7 +6,6 @@ const CompressionService = require('./compression');
 const DatabaseService = require('./database');
 const Config = require('./config');
 const HttpClient = require('./http-client');
-const Scheduler = require('./scheduler');
 
 class MaritimeServer {
   constructor() {
@@ -18,7 +17,6 @@ class MaritimeServer {
     this.compressionService = new CompressionService();
     this.databaseService = new DatabaseService();
     this.httpClient = new HttpClient();
-    this.scheduler = new Scheduler(this.config, this.databaseService, this.compressionService, this.httpClient);
     
     // Statistics tracking
     this.stats = {
@@ -51,11 +49,6 @@ class MaritimeServer {
       
       // Setup routes
       this.setupRoutes();
-      
-      // Start scheduler if in master mode
-      if (this.config.isMaster()) {
-        this.scheduler.start();
-      }
       
       // Start server
       this.start();
@@ -366,7 +359,6 @@ class MaritimeServer {
         });
       }
     });
-    // Remove scheduler and related endpoints
   }
 
   /**
@@ -384,8 +376,7 @@ class MaritimeServer {
           uptime: Date.now() - this.stats.startTime,
           database: dbStats,
           writeQueue: queueStatus,
-          nodeType: this.config.nodeType,
-          scheduler: this.config.isMaster() ? this.scheduler.getStats() : null
+          nodeType: this.config.nodeType
         };
 
         res.json(systemStats);
@@ -483,9 +474,6 @@ class MaritimeServer {
    */
   async shutdown() {
     console.log('Shutting down server...');
-    if (this.scheduler) {
-      this.scheduler.stop();
-    }
     await this.databaseService.close();
     process.exit(0);
   }
