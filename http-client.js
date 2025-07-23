@@ -125,7 +125,7 @@ class HttpClient {
               }
             });
             responseStatus = response.status;
-            // Treat 2xx and 409 as success
+            // Treat 2xx as success
             if (response.status >= 200 && response.status < 300) {
               console.log(`✅ Container ${index + 1}/${containerData.length} forwarded (ID: ${containerId})`);
               return {
@@ -138,9 +138,10 @@ class HttpClient {
           } catch (error) {
             responseStatus = error.response?.status || null;
             lastError = error;
+            console.log(`🔍 Debug: Container ${containerId} got status ${responseStatus}, error: ${error.message}`);
             // Treat 409 as idempotent success
             if (responseStatus === 409) {
-              console.log(`⚠️  Container ${index + 1}/${containerData.length} already exists (ID: ${containerId}) - treating as success`);
+              console.log(`⚠️  Container ${index + 1}/${containerData.length} already exists (ID: ${containerId}) - treating as SUCCESS`);
               return {
                 success: true,
                 containerId,
@@ -159,11 +160,12 @@ class HttpClient {
               continue;
             } else {
               // For 4xx (except 409), do not retry
+              console.log(`🚫 Container ${containerId} failed with 4xx error ${responseStatus}, will not retry`);
               break;
             }
           }
         }
-        console.error(`❌ Failed to forward container ${index + 1}: ${lastError ? lastError.message : 'Unknown error'}`);
+        console.error(`❌ Failed to forward container ${index + 1}: ${lastError ? lastError.message : 'Unknown error'} (Status: ${responseStatus})`);
         return {
           success: false,
           containerId,
@@ -174,20 +176,24 @@ class HttpClient {
       });
       // Wait for all parallel requests to complete
       const results = await Promise.all(forwardPromises);
-      // Calculate success/failure statistics
+      // Calculate success/failure statistics with debug logging
       const successful = results.filter(r => r.success && !r.alreadyExists);
-      const alreadyExists = results.filter(r => r.alreadyExists);
-      const failed = results.filter(r => !r.success && !r.alreadyExists);
+      const alreadyExists = results.filter(r => r.success && r.alreadyExists);
+      const failed = results.filter(r => !r.success);
       const processingTime = Date.now() - startTime;
+      
+      console.log(`🔍 Debug Summary: Total=${results.length}, Success=${successful.length}, AlreadyExists=${alreadyExists.length}, Failed=${failed.length}`);
+      
       console.log(`✅ Forwarding completed in ${processingTime}ms:`);
       console.log(`   📊 Successful: ${successful.length}/${containerData.length}`);
       if (alreadyExists.length > 0) {
         console.log(`   ⚠️  Already exists (409, treated as success): ${alreadyExists.length}`);
+        alreadyExists.forEach(ae => console.log(`      - Container ${ae.containerId}: Already exists (409)`));
       }
       if (failed.length > 0) {
         console.log(`   ❌ Failed: ${failed.length}/${containerData.length}`);
         failed.slice(0, 3).forEach(failure => {
-          console.log(`      - Container ${failure.containerId}: ${failure.error}`);
+          console.log(`      - Container ${failure.containerId}: ${failure.error} (Status: ${failure.responseStatus})`);
         });
         if (failed.length > 3) {
           console.log(`      - ... and ${failed.length - 3} more failures`);
