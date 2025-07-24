@@ -183,7 +183,11 @@ class MaritimeServer {
           }
         }
         // If all failures are alreadyExists (409), treat as success
-        const hasTrueFailures = forwardResult.failedContainers && forwardResult.failedContainers.length > 0;
+        // Check if there are any TRUE failures (not just 409 "already exists")
+        const totalProcessed = (forwardResult.forwardedContainers || 0) + (forwardResult.alreadyExistsContainers || []).length;
+        const hasTrueFailures = totalProcessed < decompressedContainers.length;
+        
+        console.log(`🔍 Debug: Processed=${totalProcessed}, Total=${decompressedContainers.length}, TrueFailures=${hasTrueFailures}`);
         if (!hasTrueFailures) {
           console.log(`✅ All containers forwarded or already existed (409). Returning 200.`);
           res.json({
@@ -202,11 +206,12 @@ class MaritimeServer {
         }
         // If there are true failures, return 500
         if (hasTrueFailures) {
-          console.error('❌ Failed to forward decompressed data:', forwardResult.error);
+          const actualFailedCount = forwardResult.failedContainers ? forwardResult.failedContainers.length : 0;
+          console.error(`❌ Failed to forward decompressed data: ${actualFailedCount} true failures out of ${decompressedContainers.length} containers`);
           res.status(500).json({
             success: false,
             error: 'Failed to forward decompressed data',
-            details: forwardResult.error,
+            details: `${actualFailedCount} containers failed forwarding (excluding 409 conflicts)`,
             containersProcessed: decompressedContainers.length,
             alreadyExistsContainers: forwardResult.alreadyExistsContainers,
             failedContainers: forwardResult.failedContainers,

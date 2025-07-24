@@ -120,8 +120,9 @@ class HttpClient {
             const response = await this.client.post(url, payload, {
               headers: {
                 'Content-Type': 'application/json;ty=4',
-                'X-M2M-RI': timestamp,
-                'X-M2M-ORIGIN': 'Natesh'
+                'X-M2M-RI': `${containerId}_${Date.now()}`,
+                'X-M2M-Origin': 'Natesh',
+                'Accept': 'application/json'
               }
             });
             responseStatus = response.status;
@@ -141,7 +142,7 @@ class HttpClient {
             console.log(`🔍 Debug: Container ${containerId} got status ${responseStatus}, error: ${error.message}`);
             // Treat 409 as idempotent success
             if (responseStatus === 409) {
-              console.log(`⚠️  Container ${index + 1}/${containerData.length} already exists (ID: ${containerId}) - treating as SUCCESS`);
+              console.log(`✅ 409 DETECTED: Container ${containerId} already exists - returning SUCCESS with alreadyExists=true`);
               return {
                 success: true,
                 containerId,
@@ -165,7 +166,10 @@ class HttpClient {
             }
           }
         }
-        console.error(`❌ Failed to forward container ${index + 1}: ${lastError ? lastError.message : 'Unknown error'} (Status: ${responseStatus})`);
+        // Only log error if we actually failed after all retries
+        if (lastError && responseStatus !== 409) {
+          console.error(`❌ Failed to forward container ${index + 1}: ${lastError.message} (Status: ${responseStatus})`);
+        }
         return {
           success: false,
           containerId,
@@ -184,6 +188,12 @@ class HttpClient {
       
       console.log(`🔍 Debug Summary: Total=${results.length}, Success=${successful.length}, AlreadyExists=${alreadyExists.length}, Failed=${failed.length}`);
       
+      // Debug: Log each result classification
+      results.forEach((result, i) => {
+        const type = result.success ? (result.alreadyExists ? 'ALREADY_EXISTS' : 'SUCCESS') : 'FAILED';
+        console.log(`🔍 Result ${i}: ${result.containerId} = ${type} (status: ${result.responseStatus})`);
+      });
+      
       console.log(`✅ Forwarding completed in ${processingTime}ms:`);
       console.log(`   📊 Successful: ${successful.length}/${containerData.length}`);
       if (alreadyExists.length > 0) {
@@ -200,7 +210,7 @@ class HttpClient {
         }
       }
       return {
-        success: failed.length === 0, // Success if all containers were forwarded or already existed
+        success: failed.length === 0, // Success if NO true failures (409s are not failures)
         response: {
           totalContainers: containerData.length,
           successfulForwards: successful.length,
