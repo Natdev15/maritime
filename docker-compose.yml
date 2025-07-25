@@ -1,8 +1,8 @@
 version: '3.8'
 
 services:
-  # EXAMPLE: Master Node Configuration
-  # Uncomment and configure this section for master node
+  # Master Node Configuration (Local Machine)
+  # Uncomment this section for master node
   maritime-master:
     build: .
     ports:
@@ -10,13 +10,13 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      - NODE_TYPE=master
-      - SEND_TO_URL=http://172.25.1.78:3001/api/receive-compressed
+      - NODE_MODE=master
+      - SLAVE_URL=http://172.25.1.78:3001/api/receive-compressed
       - PORT=3000
     restart: unless-stopped
 
-  # EXAMPLE: Slave Node Configuration  
-  # Uncomment and configure this section for slave node
+  # Slave Node Configuration (VM)
+  # Uncomment this section for slave node  
   # maritime-slave:
   #   build: .
   #   ports:
@@ -24,8 +24,8 @@ services:
   #   volumes:
   #     - slave_data:/app/data
   #   environment:
-  #     - NODE_TYPE=slave
-  #     - FORWARD_TO_URL=http://datacenter.example.com:8080/api/container-data
+  #     - NODE_MODE=slave
+  #     - MOBIUS_URL=http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4
   #     - PORT=3000
   #   restart: unless-stopped
 

@@ -1,514 +1,425 @@
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const path = require('path');
-const CompressionService = require('./compression');
-const DatabaseService = require('./database');
-const Config = require('./config');
-const HttpClient = require('./http-client');
+const cbor = require('cbor');
+const axios = require('axios');
 
-class MaritimeServer {
-  constructor() {
-    // Initialize configuration first
-    this.config = new Config();
+const app = express();
+
+// Environment configuration
+const NODE_MODE = process.env.NODE_MODE || 'master'; // 'master' or 'slave'
+const PORT = NODE_MODE === 'master' ? 3000 : 3001;
+const MOBIUS_URL = process.env.MOBIUS_URL || 'http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4';
+const SLAVE_URL = process.env.SLAVE_URL || 'http://localhost:3001/api/receive-compressed';
+
+// Middleware
+app.use(express.json({ limit: '10mb' }));
+app.use('/api/receive-compressed', express.raw({ type: 'application/octet-stream', limit: '10mb' }));
+
+// CBOR Compression Handler for Master Node
+class MasterCompressionHandler {
     
-    this.app = express();
-    this.port = this.config.port;
-    this.compressionService = new CompressionService();
-    this.databaseService = new DatabaseService();
-    this.httpClient = new HttpClient();
-    
-    // Statistics tracking
-    this.stats = {
-      totalRequests: 0,
-      successfulWrites: 0,
-      errors: 0,
-      startTime: Date.now(),
-      nodeType: this.config.nodeType
-    };
-    
-    console.log(`🚢 Maritime Server initializing in ${this.config.nodeType} mode`);
-  }
-
-  /**
-   * Initialize server
-   */
-  async initialize() {
-    try {
-      // Initialize database
-      await this.databaseService.initialize();
-      
-      // Optimized SQLite settings for containerized environment
-      this.databaseService.db.run('PRAGMA cache_size=-524288;'); // 512MB cache (negative means MB)
-      this.databaseService.db.run('PRAGMA mmap_size=2147483648;'); // 2GB mmap for Docker with sufficient memory
-      this.databaseService.db.run('PRAGMA wal_autocheckpoint=10000;'); // Less frequent checkpoints
-      this.databaseService.db.run('PRAGMA wal_checkpoint_fullfsync=OFF;'); // Faster WAL checkpoints
-      
-      // Setup middleware
-      this.setupMiddleware();
-      
-      // Setup routes
-      this.setupRoutes();
-      
-      // Start server
-      this.start();
-      
-      console.log(`Maritime Container Server initialized successfully in ${this.config.nodeType} mode`);
-    } catch (error) {
-      console.error('Failed to initialize server:', error);
-      process.exit(1);
-    }
-  }
-
-  /**
-   * Setup Express middleware
-   */
-  setupMiddleware() {
-    // Security middleware
-    this.app.use(helmet({
-      contentSecurityPolicy: {
-        directives: {
-          defaultSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'"],
-          scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
-          imgSrc: ["'self'", "data:", "https:"],
-          connectSrc: ["'self'"],
-          fontSrc: ["'self'", "https:", "data:"],
-          objectSrc: ["'none'"],
-          mediaSrc: ["'self'"],
-          frameSrc: ["'none'"]
-        }
-      }
-    }));
-    
-    // CORS
-    this.app.use(cors());
-    
-    // Body parsing
-    this.app.use(express.json({ limit: '100mb' })); // Increased for compressed data
-    this.app.use(express.urlencoded({ extended: true, limit: '100mb' }));
-    
-    // Static files
-    this.app.use(express.static(path.join(__dirname, 'public')));
-    
-    // Request logging
-    this.app.use((req, res, next) => {
-      this.stats.totalRequests++;
-      console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-      next();
-    });
-  }
-
-  /**
-   * Setup API routes based on master/slave mode
-   */
-  setupRoutes() {
-    // Home page
-    this.app.get('/', (req, res) => {
-      res.sendFile(path.join(__dirname, 'public', 'index.html'));
-    });
-
-    // Health check endpoint (available in both modes)
-    this.app.get('/api/health', (req, res) => {
-      res.json({
-        status: 'healthy',
-        nodeType: this.config.nodeType,
-        timestamp: new Date().toISOString(),
-        uptime: Date.now() - this.stats.startTime,
-        config: this.config.getSummary()
-      });
-    });
-
-    // Slave-only endpoint: Receive and forward compressed data
-    if (this.config.isSlave()) {
-      this.setupSlaveRoutes();
-    }
-
-    // Master-only endpoints: Container data ingestion and management
-    if (this.config.isMaster()) {
-      this.setupMasterRoutes();
-    }
-
-    // Common endpoints for stats and health
-    this.setupCommonRoutes();
-
-    // 404 handler
-    this.app.use('*', (req, res) => {
-      res.status(404).json({ error: 'Endpoint not found' });
-    });
-  }
-
-  /**
-   * Setup slave-specific routes
-   */
-  setupSlaveRoutes() {
-    console.log('🔗 Setting up slave-specific routes');
-
-    // Receive compressed data from master and forward it
-    this.app.post('/api/receive-compressed', async (req, res) => {
-      try {
-        const { compressedData, metadata } = req.body;
-        if (!compressedData) {
-          return res.status(400).json({ error: 'Missing compressedData in request body' });
-        }
-        console.log(`${new Date().toISOString()} - POST /api/receive-compressed`);
-        console.log('📨 Received compressed data from master');
-        console.log(`📊 Metadata:`, metadata);
-        // Convert base64 back to buffer
-        const compressedBuffer = Buffer.from(compressedData, 'base64');
-        console.log(`📊 Compressed data size: ${this.formatBytes(compressedBuffer.length)}`);
-        // Decompress the data
-                  console.log('🔓 MessagePack decompressing received data...');
-          const decompressedContainers = await this.compressionService.decompressMultiple(compressedBuffer);
-          console.log(`✅ Successfully MessagePack decompressed ${decompressedContainers.length} containers`);
-        // Forward decompressed data to target endpoint
-        console.log('📨 Forwarding decompressed data...');
-        const forwardResult = await this.httpClient.forwardDecompressedData(
-          this.config.getForwardToUrl(),
-          decompressedContainers,
-          {
-            receivedAt: new Date().toISOString(),
-            originalMetadata: metadata,
-            decompressedContainerCount: decompressedContainers.length
-          }
-        );
-        // Log and store failed containers for retry
-        if (forwardResult.failedContainers && forwardResult.failedContainers.length > 0) {
-          console.warn(`⚠️  ${forwardResult.failedContainers.length} containers failed to forward. IDs:`, forwardResult.failedContainers);
-          // Store failed containers for persistent retry
-          for (const failedId of forwardResult.failedContainers) {
-            const failed = decompressedContainers.find(c => c.containerId === failedId);
-            if (failed) {
-              await this.databaseService.addFailedForward(failed);
-            }
-          }
-        }
-        // If all failures are alreadyExists (409), treat as success
-        // Check if there are any TRUE failures (not just 409 "already exists")
-        const totalProcessed = (forwardResult.forwardedContainers || 0) + (forwardResult.alreadyExistsContainers || []).length;
-        const hasTrueFailures = totalProcessed < decompressedContainers.length;
-        
-        console.log(`🔍 Debug: Processed=${totalProcessed}, Total=${decompressedContainers.length}, TrueFailures=${hasTrueFailures}`);
-        if (!hasTrueFailures) {
-          console.log(`✅ All containers forwarded or already existed (409). Returning 200.`);
-          res.json({
-            success: true,
-            message: 'Data received, decompressed, and forwarded successfully (including already existing containers)',
-            containersProcessed: decompressedContainers.length,
-            forwardResult: {
-              status: forwardResult.responseStatus,
-              forwardedContainers: forwardResult.forwardedContainers,
-              alreadyExistsContainers: forwardResult.alreadyExistsContainers,
-              failedContainers: [],
-              results: forwardResult.response.results
-            }
-          });
-          return;
-        }
-        // If there are true failures, return 500
-        if (hasTrueFailures) {
-          const actualFailedCount = forwardResult.failedContainers ? forwardResult.failedContainers.length : 0;
-          console.error(`❌ Failed to forward decompressed data: ${actualFailedCount} true failures out of ${decompressedContainers.length} containers`);
-          res.status(500).json({
-            success: false,
-            error: 'Failed to forward decompressed data',
-            details: `${actualFailedCount} containers failed forwarding (excluding 409 conflicts)`,
-            containersProcessed: decompressedContainers.length,
-            alreadyExistsContainers: forwardResult.alreadyExistsContainers,
-            failedContainers: forwardResult.failedContainers,
-            results: forwardResult.response ? forwardResult.response.results : undefined
-          });
-          return;
-        }
-      } catch (error) {
-        this.stats.errors++;
-        console.error('❌ Error processing compressed data:', error);
-        res.status(500).json({
-          success: false,
-          error: 'Failed to process compressed data',
-          message: error.message
-        });
-      }
-    });
-
-    // Background job: Retry failed forwards every 2 minutes
-    setInterval(async () => {
-      try {
-        const failed = await this.databaseService.getAllFailedForwards(100);
-        if (failed.length === 0) return;
-        console.log(`🔄 Retrying ${failed.length} failed forwards to Mobius...`);
-        const retryResult = await this.httpClient.forwardDecompressedData(
-          this.config.getForwardToUrl(),
-          failed,
-          { retry: true, batchSize: failed.length, timestamp: new Date().toISOString() }
-        );
-        // Remove successfully forwarded or 409 containers from failed_forwards
-        if (retryResult && retryResult.response && retryResult.response.results) {
-          const succeededIds = retryResult.response.results
-            .filter(r => r.success)
-            .map((r, i) => failed[i].id);
-          if (succeededIds.length > 0) {
-            await this.databaseService.deleteFailedForwardsByIds(succeededIds);
-            console.log(`✅ Removed ${succeededIds.length} successfully retried containers from failed_forwards.`);
-          }
-        }
-      } catch (err) {
-        console.error('❌ Error during persistent retry of failed forwards:', err);
-      }
-    }, 2 * 60 * 1000); // every 2 minutes
-  }
-
-  /**
-   * Setup master-specific routes
-   */
-  setupMasterRoutes() {
-    console.log('🎯 Setting up master-specific routes');
-
-    // Container data ingestion endpoint
-    this.app.post('/api/container', async (req, res) => {
-      try {
-        const containerData = req.body;
-        // Validate required fields
-        if (!containerData.containerId && !containerData.iso6346) {
-          return res.status(400).json({ 
-            error: 'Container ID is required (containerId or iso6346)' 
-          });
-        }
-        const containerId = containerData.containerId || containerData.iso6346;
-        // Compress the data
-        console.log(`${new Date().toISOString()} - POST /api/container`);
-        console.log('📦 Received container data for MessagePack compression');
-        const compressedData = await this.compressionService.compress(containerData);
-        console.log(`🗜️ MessagePack compressed container: ${this.compressionService.formatBytes(compressedData.length)}`);
-        // Add to queue (returns immediately for fast response)
-        const queueResult = await this.databaseService.addToQueue(containerId, compressedData);
-        this.stats.successfulWrites++;
-        // Immediately send to slave
-        const bulkCompressedData = await this.compressionService.compressMultiple([{ containerId, data: containerData }]);
-        console.log(`🗜️ MessagePack compressing batch of 1 containers...`);
-        console.log(`📊 MessagePack compression completed: ${this.compressionService.formatBytes(bulkCompressedData.length)}`);
-        const sendResult = await this.httpClient.sendCompressedData(
-          this.config.getSendToUrl(),
-          bulkCompressedData,
-          {
-            originalSize: JSON.stringify([containerData]).length,
-            compressionRatio: JSON.stringify([containerData]).length / bulkCompressedData.length,
-            containerCount: 1,
-            compressionTimestamp: new Date().toISOString()
-          }
-        );
-        if (sendResult.success) {
-          // Optionally, clear sent data from DB
-          await this.databaseService.deleteContainersByIds([containerId]);
-          res.status(201).json({ 
-            success: true, 
-            containerId,
-            compressionRatio: this.compressionService.getCompressionRatio(containerData, compressedData),
-            queue: queueResult,
-            sentToSlave: true
-          });
-        } else {
-          res.status(500).json({
-            error: 'Failed to send to slave',
-            details: sendResult.error
-          });
-        }
-      } catch (error) {
-        this.stats.errors++;
-        console.error('Error processing container data:', error);
-        res.status(500).json({ 
-          error: 'Failed to process container data',
-          message: error.message 
-        });
-      }
-    });
-
-    // Bulk container data ingestion
-    this.app.post('/api/containers/bulk', async (req, res) => {
-      try {
-        const containers = req.body.containers || req.body;
-        if (!Array.isArray(containers)) {
-          return res.status(400).json({ error: 'Expected array of containers' });
-        }
-        const validContainers = containers.filter(c => c.containerId || c.iso6346);
-        const decompressedContainers = validContainers.map(c => ({
-          containerId: c.containerId || c.iso6346,
-          data: c
-        }));
-        // Compress all valid containers
-        const bulkCompressedData = await this.compressionService.compressMultiple(decompressedContainers);
-        console.log(`📊 MessagePack compression completed: ${this.compressionService.formatBytes(bulkCompressedData.length)}`);
-        const sendResult = await this.httpClient.sendCompressedData(
-          this.config.getSendToUrl(),
-          bulkCompressedData,
-          {
-            originalSize: JSON.stringify(validContainers).length,
-            compressionRatio: JSON.stringify(validContainers).length / bulkCompressedData.length,
-            containerCount: validContainers.length,
-            compressionTimestamp: new Date().toISOString()
-          }
-        );
-        if (sendResult.success) {
-          // Optionally, clear sent data from DB
-          await this.databaseService.deleteContainersByIds(validContainers.map(c => c.containerId || c.iso6346));
-          res.json({ 
-            processed: validContainers.length,
-            sentToSlave: true,
-            sendResult
-          });
-        } else {
-          res.status(500).json({
-            error: 'Failed to send to slave',
-            details: sendResult.error
-          });
-        }
-      } catch (error) {
-        this.stats.errors++;
-        console.error('Error processing bulk container data:', error);
-        res.status(500).json({ 
-          error: 'Failed to process bulk container data',
-          message: error.message 
-        });
-      }
-    });
-  }
-
-  /**
-   * Setup common routes available in both modes
-   */
-  setupCommonRoutes() {
-    // System statistics
-    this.app.get('/api/stats', async (req, res) => {
-      try {
-        const dbStats = await this.databaseService.getStats();
-        const queueStatus = this.databaseService.getQueueStatus();
-        
-        const systemStats = {
-          ...this.stats,
-          uptime: Date.now() - this.stats.startTime,
-          database: dbStats,
-          writeQueue: queueStatus,
-          nodeType: this.config.nodeType
-        };
-
-        res.json(systemStats);
-        
-      } catch (error) {
-        console.error('Error fetching stats:', error);
-        res.status(500).json({ 
-          error: 'Failed to fetch stats',
-          message: error.message 
-        });
-      }
-    });
-
-    // Get recent container data (master only functionality but available for compatibility)
-    this.app.get('/api/containers', async (req, res) => {
-      if (this.config.isSlave()) {
-        return res.status(403).json({ 
-          error: 'Container data access not available in slave mode' 
-        });
-      }
-
-      try {
-        const limit = parseInt(req.query.limit) || 100;
-        const offset = parseInt(req.query.offset) || 0;
-        
-        const rows = await this.databaseService.getRecentContainerData(limit, offset);
-        
-        // Decompress data for response
-        const containers = await Promise.all(rows.map(async (row) => {
-          try {
-            const decompressedData = await this.compressionService.decompress(row.compressed_data);
-            return {
-              id: row.id,
-              containerId: row.container_id,
-              timestamp: row.timestamp,
-              data: decompressedData
+    compressMaritimePayload(conData) {
+        try {
+            // Compress the "con" payload with CBOR using optimized keys
+            const optimizedPayload = {
+                "ms": conData.msisdn,
+                "iso": conData.iso6346,
+                "t": conData.time,
+                "rssi": parseInt(conData.rssi),
+                "cgi": conData.cgi,
+                "bl": parseInt(conData["ble-m"]),
+                "ba": parseInt(conData["bat-soc"]),
+                "a": conData.acc.split(' ').map(val => parseFloat(val)),
+                "te": parseFloat(conData.temperature),
+                "h": parseInt(conData.humidity),
+                "p": parseFloat(conData.pressure),
+                "d": conData.door,
+                "g": parseInt(conData.gnss),
+                "lat": parseFloat(conData.latitude),
+                "lon": parseFloat(conData.longitude),
+                "alt": parseFloat(conData.altitude),
+                "s": parseFloat(conData.speed),
+                "hd": parseFloat(conData.heading),
+                "n": parseInt(conData.nsat),
+                "hp": parseFloat(conData.hdop)
             };
-          } catch (error) {
-            console.error('Error decompressing data for container:', row.container_id, error);
+            
+            // CBOR encode the optimized payload
+            const cborBuffer = cbor.encode(optimizedPayload);
+            
+            // Calculate compression metrics
+            const originalSize = JSON.stringify(conData).length;
+            const compressedSize = cborBuffer.length;
+            const compressionRatio = Math.round(((originalSize - compressedSize) / originalSize) * 100);
+            
+            console.log(`🗜️  CBOR compression completed:`);
+            console.log(`   Original size: ${originalSize} bytes`);
+            console.log(`   Compressed size: ${compressedSize} bytes`);
+            console.log(`   Compression ratio: ${compressionRatio}% saved`);
+            
             return {
-              id: row.id,
-              containerId: row.container_id,
-              timestamp: row.timestamp,
-              error: 'Failed to decompress data'
+                compressedData: cborBuffer,
+                originalSize,
+                compressedSize,
+                compressionRatio
             };
-          }
-        }));
-
-        res.json({ containers, total: containers.length });
-        
-      } catch (error) {
-        console.error('Error fetching container data:', error);
-        res.status(500).json({ 
-          error: 'Failed to fetch container data',
-          message: error.message 
-        });
-      }
-    });
-  }
-
-  /**
-   * Helper to format bytes into a human-readable string
-   */
-  formatBytes(bytes, decimals = 2) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-  }
-
-  /**
-   * Start the server
-   */
-  start() {
-    this.app.listen(this.port, () => {
-      console.log(`\n🚢 Maritime Container Server running on port ${this.port} (${this.config.nodeType} mode)`);
-      console.log(`📊 Dashboard: http://localhost:${this.port}`);
-      console.log(`🔌 API: http://localhost:${this.port}/api`);
-      console.log(`💾 Database: SQLite with CBOR encoding`);
-      if (this.config.isMaster()) {
-        console.log(`📤 Send to: ${this.config.getSendToUrl()}`);
-        console.log(`⏰ Compression schedule: every ${this.config.compressionScheduleHours} hours`);
-      }
-      if (this.config.isSlave()) {
-        console.log(`📨 Forward to: ${this.config.getForwardToUrl()}`);
-      }
-      console.log(`⚡ Ready to handle maritime container data\n`);
-    });
-  }
-
-  /**
-   * Graceful shutdown
-   */
-  async shutdown() {
-    console.log('Shutting down server...');
-    await this.databaseService.close();
-    process.exit(0);
-  }
+            
+        } catch (error) {
+            console.error('❌ CBOR compression failed:', error);
+            throw new Error(`CBOR compression failed: ${error.message}`);
+        }
+    }
+    
+    async sendToSlave(compressedBuffer, metadata) {
+        try {
+            console.log('📤 Sending compressed data to Slave node...');
+            console.log('🎯 Slave URL:', SLAVE_URL);
+            console.log('📊 Compressed data size:', compressedBuffer.length, 'bytes');
+            
+            const response = await axios.post(SLAVE_URL, compressedBuffer, {
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'Device-ID': metadata.deviceId || 'ESP32_MARITIME_001',
+                    'Network-Type': metadata.networkType || 'cellular',
+                    'Compression-Type': 'cbor',
+                    'Original-Size': metadata.originalSize?.toString() || '378'
+                },
+                timeout: 30000
+            });
+            
+            console.log(`✅ Slave Response: ${response.status} ${response.statusText}`);
+            
+            return {
+                success: true,
+                status: response.status,
+                data: response.data
+            };
+            
+        } catch (error) {
+            console.error('❌ Failed to send to Slave:', error.message);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
 }
 
-// Handle graceful shutdown
-process.on('SIGINT', async () => {
-  if (global.server) {
-    await global.server.shutdown();
-  }
+// CBOR Decompression Handler for Slave Node
+class SlaveCompressionHandler {
+    
+    decompressMaritimePayload(compressedBuffer) {
+        try {
+            // Decode CBOR binary data
+            const decompressed = cbor.decode(compressedBuffer);
+            
+            console.log('🔓 CBOR decompression completed');
+            console.log('📊 Decompressed keys:', Object.keys(decompressed));
+            
+            // Reconstruct original JSON format for Mobius
+            const reconstructed = {
+                "msisdn": decompressed.ms || decompressed.msisdn,
+                "iso6346": decompressed.iso || decompressed.iso6346,
+                "time": decompressed.t || decompressed.time,
+                "rssi": decompressed.rssi?.toString() || "0",
+                "cgi": decompressed.cgi || "",
+                "ble-m": decompressed.bl !== undefined ? decompressed.bl.toString() : "0",
+                "bat-soc": decompressed.ba !== undefined ? decompressed.ba.toString() : "0",
+                "acc": this.reconstructAccelerometer(decompressed.a || decompressed.acc),
+                "temperature": this.formatFloat(decompressed.te || decompressed.temperature),
+                "humidity": this.formatFloat(decompressed.h || decompressed.humidity),
+                "pressure": this.formatFloat(decompressed.p || decompressed.pressure),
+                "door": decompressed.d || decompressed.door || "D",
+                "gnss": decompressed.g !== undefined ? decompressed.g.toString() : "1",
+                "latitude": this.formatFloat(decompressed.lat || decompressed.latitude),
+                "longitude": this.formatFloat(decompressed.lon || decompressed.longitude),
+                "altitude": this.formatFloat(decompressed.alt || decompressed.altitude),
+                "speed": this.formatFloat(decompressed.s || decompressed.speed),
+                "heading": this.formatFloat(decompressed.hd || decompressed.heading),
+                "nsat": decompressed.n !== undefined ? decompressed.n.toString().padStart(2, '0') : "06",
+                "hdop": this.formatFloat(decompressed.hp || decompressed.hdop)
+            };
+            
+            console.log('✅ Successfully reconstructed maritime payload');
+            
+            return reconstructed;
+        } catch (error) {
+            throw new Error(`CBOR decompression failed: ${error.message}`);
+        }
+    }
+    
+    reconstructAccelerometer(accData) {
+        if (Array.isArray(accData)) {
+            return accData.map(val => val.toFixed(4)).join(' ');
+        } else if (typeof accData === 'string') {
+            return accData;
+        }
+        return "0.0000 0.0000 0.0000";
+    }
+    
+    formatFloat(value) {
+        if (typeof value === 'number') {
+            return value.toFixed(2);
+        }
+        return value?.toString() || "0.00";
+    }
+    
+    async sendToMobius(sensorData, deviceId = 'ESP32_MARITIME_001') {
+        try {
+            // Create oneM2M payload structure (exactly as Mobius expects)
+            const oneM2MPayload = {
+                "m2m:cin": {
+                    "con": sensorData
+                }
+            };
+            
+            console.log('📤 Sending reconstructed data to Mobius...');
+            console.log('🎯 Mobius URL:', MOBIUS_URL);
+            console.log('📊 oneM2M payload size:', JSON.stringify(oneM2MPayload).length, 'bytes');
+            console.log('📦 Content ("con") size:', JSON.stringify(sensorData).length, 'bytes');
+            
+            const response = await axios.post(MOBIUS_URL, oneM2MPayload, {
+                headers: {
+                    'Content-Type': 'application/json;ty=4',
+                    'X-M2M-RI': `${Date.now()}`,
+                    'X-M2M-Origin': 'Natesh'
+                },
+                timeout: 30000
+            });
+            
+            console.log(`✅ Mobius Response: ${response.status} ${response.statusText}`);
+            
+            // Log the oneM2M response structure (matching user's expected logs)
+            if (response.data && response.data['m2m:cin']) {
+                const cin = response.data['m2m:cin'];
+                console.log('📋 Mobius Created Resource:');
+                console.log(`   Resource Name: ${cin.rn}`);
+                console.log(`   Resource ID: ${cin.ri}`);
+                console.log(`   Content Size: ${cin.cs} bytes`);
+                console.log(`   Creation Time: ${cin.ct}`);
+                console.log(`   State Tag: ${cin.st}`);
+                console.log(`   Creator: ${cin.cr}`);
+                
+                // Log the full response (as shown in user's Mobius logs)
+                console.log('🗂️  Full Mobius Response:');
+                console.log(JSON.stringify(response.data, null, 2));
+            }
+            
+            return {
+                success: true,
+                status: response.status,
+                data: response.data,
+                contentSize: response.data?.['m2m:cin']?.cs || null
+            };
+            
+        } catch (error) {
+            console.error('❌ Failed to send to Mobius:', error.message);
+            
+            if (error.response) {
+                console.error(`📊 Mobius Error Response: ${error.response.status} ${error.response.statusText}`);
+                console.error(`📦 Error Data:`, error.response.data);
+            }
+            
+            return {
+                success: false,
+                status: error.response?.status || null,
+                error: error.message
+            };
+        }
+    }
+}
+
+// Initialize handlers
+const masterHandler = new MasterCompressionHandler();
+const slaveHandler = new SlaveCompressionHandler();
+
+// =============================================================================
+// MASTER NODE ROUTES
+// =============================================================================
+
+if (NODE_MODE === 'master') {
+    
+    // Receive raw JSON data from test-load.js and compress with CBOR
+    app.post('/api/container', async (req, res) => {
+        try {
+            const { con, metadata } = req.body;
+            const deviceId = req.headers['device-id'] || metadata?.deviceId || 'ESP32_MARITIME_001';
+            const networkType = req.headers['network-type'] || metadata?.networkType || 'cellular';
+            
+            console.log(`📨 Received raw JSON payload from ${deviceId}`);
+            console.log('📊 Network type:', networkType);
+            console.log('📦 Original payload size:', JSON.stringify(con).length, 'bytes');
+            
+            // Compress the "con" payload with CBOR
+            const compressionResult = masterHandler.compressMaritimePayload(con);
+            
+            // Send compressed data to Slave node
+            const slaveResponse = await masterHandler.sendToSlave(compressionResult.compressedData, {
+                deviceId,
+                networkType,
+                originalSize: compressionResult.originalSize,
+                compressedSize: compressionResult.compressedSize,
+                compressionRatio: compressionResult.compressionRatio
+            });
+            
+            if (slaveResponse.success) {
+                console.log('✅ Successfully processed and forwarded to Slave');
+                res.status(200).json({
+                    success: true,
+                    message: 'Data compressed and forwarded to Slave successfully',
+                    deviceId,
+                    networkType,
+                    originalSize: compressionResult.originalSize,
+                    compressedSize: compressionResult.compressedSize,
+                    compressionRatio: compressionResult.compressionRatio,
+                    slaveStatus: slaveResponse.status,
+                    mobiusStatus: slaveResponse.data?.mobiusStatus || null
+                });
+            } else {
+                throw new Error(`Slave forwarding failed: ${slaveResponse.error}`);
+            }
+            
+        } catch (error) {
+            console.error('❌ Error processing raw JSON data:', error);
+            res.status(500).json({
+                success: false,
+                error: error.message
+            });
+        }
+    });
+    
+    // Health check for Master node
+    app.get('/api/health', (req, res) => {
+        res.json({
+            status: 'healthy',
+            service: 'maritime-master-node',
+            mode: 'master',
+            timestamp: new Date().toISOString(),
+            features: [
+                'cbor-compression',
+                'raw-json-processing', 
+                'slave-forwarding'
+            ]
+        });
+    });
+}
+
+// =============================================================================
+// SLAVE NODE ROUTES
+// =============================================================================
+
+if (NODE_MODE === 'slave') {
+    
+    // Receive compressed CBOR data from Master node
+    app.post('/api/receive-compressed', async (req, res) => {
+        try {
+            const compressedBuffer = req.body;
+            const deviceId = req.headers['device-id'] || 'unknown';
+            const networkType = req.headers['network-type'] || 'cellular';
+            const compressionType = req.headers['compression-type'] || 'cbor';
+            const originalSize = parseInt(req.headers['original-size']) || 378;
+            
+            console.log(`📨 Received compressed data from Master`);
+            console.log(`📊 Device: ${deviceId}, Network: ${networkType}`);
+            console.log(`📊 Compressed size: ${compressedBuffer.length} bytes`);
+            console.log(`🗜️  Compression type: ${compressionType}`);
+            console.log(`📏 Original size: ${originalSize} bytes`);
+            
+            // Decompress CBOR payload
+            const decompressedData = slaveHandler.decompressMaritimePayload(compressedBuffer);
+            
+            const compressionRatio = Math.round(((originalSize - compressedBuffer.length) / originalSize) * 100);
+            console.log(`📊 Compression ratio: ${compressionRatio}% saved`);
+            
+            // Forward to Mobius with oneM2M headers
+            const mobiusResponse = await slaveHandler.sendToMobius(decompressedData, deviceId);
+            
+            if (mobiusResponse.success) {
+                res.status(200).json({
+                    success: true,
+                    message: 'Data decompressed and forwarded to Mobius successfully',
+                    deviceId,
+                    networkType,
+                    compressedSize: compressedBuffer.length,
+                    decompressedSize: originalSize,
+                    compressionRatio,
+                    mobiusStatus: mobiusResponse.status,
+                    mobiusContentSize: mobiusResponse.contentSize
+                });
+            } else {
+                throw new Error(`Mobius forwarding failed: ${mobiusResponse.error}`);
+            }
+            
+        } catch (error) {
+            console.error('❌ Error processing compressed data:', error);
+            res.status(500).json({
+                success: false,
+                error: error.message
+            });
+        }
+    });
+    
+    // Health check for Slave node
+    app.get('/api/health', (req, res) => {
+        res.json({
+            status: 'healthy',
+            service: 'maritime-slave-node',
+            mode: 'slave',
+            timestamp: new Date().toISOString(),
+            features: [
+                'cbor-decompression',
+                'mobius-forwarding',
+                'onem2m-integration'
+            ]
+        });
+    });
+}
+
+// =============================================================================
+// COMMON ROUTES
+// =============================================================================
+
+// Status endpoint for both modes
+app.get('/api/status', (req, res) => {
+    res.json({
+        service: 'maritime-compression-server',
+        mode: NODE_MODE,
+        port: PORT,
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        memoryUsage: process.memoryUsage(),
+        endpoints: NODE_MODE === 'master' 
+            ? ['/api/container', '/api/health', '/api/status']
+            : ['/api/receive-compressed', '/api/health', '/api/status']
+    });
 });
 
-process.on('SIGTERM', async () => {
-  if (global.server) {
-    await global.server.shutdown();
-  }
+// Error handling middleware
+app.use((error, req, res, next) => {
+    console.error('💥 Server error:', error);
+    res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+        message: error.message
+    });
 });
 
 // Start server
-if (require.main === module) {
-  const server = new MaritimeServer();
-  global.server = server;
-  server.initialize();
-}
-
-module.exports = MaritimeServer; 
+app.listen(PORT, () => {
+    console.log(`🚢 Maritime Compression Server running on port ${PORT}`);
+    console.log(`🔧 Mode: ${NODE_MODE.toUpperCase()}`);
+    
+    if (NODE_MODE === 'master') {
+        console.log('✅ CBOR compression enabled');
+        console.log('✅ Raw JSON processing ready');
+        console.log(`🎯 Slave URL: ${SLAVE_URL}`);
+        console.log('📡 Endpoints: POST /api/container');
+    } else {
+        console.log('✅ CBOR decompression enabled');
+        console.log('✅ Mobius oneM2M integration configured');
+        console.log(`🎯 Mobius URL: ${MOBIUS_URL}`);
+        console.log('📡 Endpoints: POST /api/receive-compressed');
+    }
+    
+    console.log('📋 Health check: GET /api/health');
+    console.log('📊 Status: GET /api/status');
+}); 
