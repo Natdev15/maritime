@@ -151,15 +151,16 @@ class MaritimeServer {
         if (!compressedData) {
           return res.status(400).json({ error: 'Missing compressedData in request body' });
         }
-        console.log(`📨 Received compressed data from master`);
+        console.log(`${new Date().toISOString()} - POST /api/receive-compressed`);
+        console.log('📨 Received compressed data from master');
         console.log(`📊 Metadata:`, metadata);
         // Convert base64 back to buffer
         const compressedBuffer = Buffer.from(compressedData, 'base64');
         console.log(`📊 Compressed data size: ${this.formatBytes(compressedBuffer.length)}`);
         // Decompress the data
-        console.log('🔓 Decompressing received data...');
-        const decompressedContainers = await this.compressionService.decompressMultiple(compressedBuffer);
-        console.log(`✅ Successfully decompressed ${decompressedContainers.length} containers`);
+                  console.log('🔓 LZ4 decompressing received data...');
+          const decompressedContainers = await this.compressionService.decompressMultiple(compressedBuffer);
+          console.log(`✅ Successfully LZ4 decompressed ${decompressedContainers.length} containers`);
         // Forward decompressed data to target endpoint
         console.log('📨 Forwarding decompressed data...');
         const forwardResult = await this.httpClient.forwardDecompressedData(
@@ -275,12 +276,17 @@ class MaritimeServer {
         }
         const containerId = containerData.containerId || containerData.iso6346;
         // Compress the data
+        console.log(`${new Date().toISOString()} - POST /api/container`);
+        console.log('📦 Received container data for LZ4 compression');
         const compressedData = await this.compressionService.compress(containerData);
+        console.log(`🗜️ LZ4 compressed container: ${this.compressionService.formatBytes(compressedData.length)}`);
         // Add to queue (returns immediately for fast response)
         const queueResult = await this.databaseService.addToQueue(containerId, compressedData);
         this.stats.successfulWrites++;
         // Immediately send to slave
         const bulkCompressedData = await this.compressionService.compressMultiple([{ containerId, data: containerData }]);
+        console.log(`🗜️ LZ4 compressing batch of 1 containers...`);
+        console.log(`📊 LZ4 compression completed: ${this.compressionService.formatBytes(bulkCompressedData.length)}`);
         const sendResult = await this.httpClient.sendCompressedData(
           this.config.getSendToUrl(),
           bulkCompressedData,
@@ -331,6 +337,7 @@ class MaritimeServer {
         }));
         // Compress all valid containers
         const bulkCompressedData = await this.compressionService.compressMultiple(decompressedContainers);
+        console.log(`📊 LZ4 compression completed: ${this.compressionService.formatBytes(bulkCompressedData.length)}`);
         const sendResult = await this.httpClient.sendCompressedData(
           this.config.getSendToUrl(),
           bulkCompressedData,
