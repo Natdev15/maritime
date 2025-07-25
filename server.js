@@ -8,7 +8,7 @@ const app = express();
 const NODE_MODE = process.env.NODE_MODE || 'master'; // 'master' or 'slave'
 const PORT = NODE_MODE === 'master' ? 3000 : 3001;
 const MOBIUS_URL = process.env.MOBIUS_URL || 'http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4';
-const SLAVE_URL = process.env.SLAVE_URL || 'http://localhost:3001/api/receive-compressed';
+const SLAVE_URL = process.env.SLAVE_URL || 'http://172.25.1.78/api/receive-compressed';
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -404,7 +404,7 @@ app.use((error, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚢 Maritime Compression Server running on port ${PORT}`);
     console.log(`🔧 Mode: ${NODE_MODE.toUpperCase()}`);
     

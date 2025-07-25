@@ -45,9 +45,9 @@ ENV NODE_ENV=production
 ENV NODE_MODE=master
 ENV PORT=3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/api/health || exit 1
+# Health check (commented out - like previous implementation)
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+#     CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/api/health || exit 1
 
 # Expose port
 EXPOSE 3000
