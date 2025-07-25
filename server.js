@@ -462,7 +462,7 @@ class MaritimeServer {
       console.log(`\n🚢 Maritime Container Server running on port ${this.port} (${this.config.nodeType} mode)`);
       console.log(`📊 Dashboard: http://localhost:${this.port}`);
       console.log(`🔌 API: http://localhost:${this.port}/api`);
-      console.log(`💾 Database: SQLite with Brotli compression`);
+      console.log(`💾 Database: SQLite with CBOR encoding`);
       if (this.config.isMaster()) {
         console.log(`📤 Send to: ${this.config.getSendToUrl()}`);
         console.log(`⏰ Compression schedule: every ${this.config.compressionScheduleHours} hours`);

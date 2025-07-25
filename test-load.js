@@ -1,4 +1,5 @@
 const axios = require('axios');
+// No CBOR import needed
 
 // node test-load.js bulk --total=100 --records=100
 // node test-load.js individual --total=100
@@ -7,7 +8,7 @@ const axios = require('axios');
 
 class LoadTester {
   constructor(options = {}) {
-    this.serverUrl = 'http://localhost:3000';
+    this.serverUrl = 'http://localhost:3000'; // Master node endpoint
     this.totalContainers = options.totalContainers || 100; // Number of unique containers
     this.recordsPerContainer = options.recordsPerContainer || 50; // Records per container
     this.batchSize = options.batchSize || 2000; // Containers per batch (for bulk mode)
@@ -78,7 +79,7 @@ class LoadTester {
     return allRecords;
   }
 
-  // Send a batch of containers
+  // Send a batch of containers (plain JSON)
   async sendBatch(containers) {
     try {
       const response = await axios.post(`${this.serverUrl}/api/containers/bulk`, {
@@ -86,7 +87,6 @@ class LoadTester {
       }, {
         timeout: 100000
       });
-
       return {
         success: true,
         processed: response.data.processed,
@@ -101,7 +101,7 @@ class LoadTester {
     }
   }
 
-  // Send individual container (for comparison)
+  // Send individual container (plain JSON)
   async sendSingle(container) {
     try {
       const response = await axios.post(`${this.serverUrl}/api/container`, container, {
