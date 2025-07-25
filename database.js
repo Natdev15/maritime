@@ -221,7 +221,7 @@ class DatabaseService {
         const stmt = db.prepare(`
           INSERT INTO container_data (container_id, timestamp, compressed_data)
           VALUES (?, ?, ?)
-          ON CONFLICT(rowid) DO UPDATE SET
+          ON CONFLICT(container_id) DO UPDATE SET
             timestamp = excluded.timestamp,
             compressed_data = excluded.compressed_data
         `);

@@ -182,7 +182,16 @@ class Config {
     if (!this.isSlave()) {
       throw new Error('getForwardToUrl() can only be called in slave mode');
     }
-    return this.forwardToUrl;
+    
+    // Fix double http:// prefix issue
+    let url = this.forwardToUrl;
+    if (url && url.startsWith('http://http://')) {
+      url = url.replace('http://http://', 'http://');
+    } else if (url && url.startsWith('https://https://')) {
+      url = url.replace('https://https://', 'https://');
+    }
+    
+    return url;
   }
 
   /**
