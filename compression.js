@@ -1,134 +1,127 @@
-const lz4 = require('lz4js');
+const msgpack = require('msgpack5')();
 
 /**
- * Full JSON Compression Service - CBOR encoding of complete JSON
- * CBOR is a binary serialization format, not a compressor, but is much more compact than JSON and ideal for IoT/embedded.
+ * MessagePack Compression Service - Binary serialization for IoT/embedded systems
+ * MessagePack is a binary serialization format that's more compact than JSON and optimized for ESP32/embedded devices.
  */
 class CompressionService {
   constructor() {
-    // LZ4 doesn't require any initialization options
-    // Pure JavaScript implementation for optimal compatibility
+    // MessagePack doesn't require any initialization options
+    // Efficient binary serialization for IoT and M2M applications
   }
 
   async compress(containerData) {
     try {
-      // Convert to JSON string first, then to Uint8Array
-      const jsonString = JSON.stringify(containerData);
-      const inputBuffer = Buffer.from(jsonString, 'utf8');
+      // MessagePack encoding - returns Buffer directly
+      const compressed = msgpack.encode(containerData);
       
-      // LZ4 compression - returns Uint8Array
-      const compressed = lz4.compress(inputBuffer);
-      
-      // Convert back to Buffer for consistency with existing code
       return Buffer.from(compressed);
     } catch (error) {
-      throw new Error(`LZ4 compression failed: ${error.message}`);
+      throw new Error(`MessagePack compression failed: ${error.message}`);
     }
   }
 
   async decompress(compressedBuffer) {
     try {
-      // Ensure we have a Uint8Array for lz4js
-      const uint8Array = new Uint8Array(compressedBuffer);
+      // MessagePack decoding - handles Buffer directly
+      const decompressed = msgpack.decode(compressedBuffer);
       
-      // LZ4 decompression - returns Uint8Array
-      const decompressed = lz4.decompress(uint8Array);
-      
-      // Convert back to string and parse JSON
-      const jsonString = Buffer.from(decompressed).toString('utf8');
-      return JSON.parse(jsonString);
+      return decompressed;
     } catch (error) {
-      throw new Error(`LZ4 decompression failed: ${error.message}`);
+      throw new Error(`MessagePack decompression failed: ${error.message}`);
     }
   }
 
   async compressMultiple(containersArray) {
     try {
-      // Convert array to JSON string first, then to Uint8Array
-      const jsonString = JSON.stringify(containersArray);
-      const inputBuffer = Buffer.from(jsonString, 'utf8');
+      // MessagePack encoding of entire array
+      const compressed = msgpack.encode(containersArray);
       
-      // LZ4 compression - returns Uint8Array
-      const compressed = lz4.compress(inputBuffer);
-      
-      // Convert back to Buffer for consistency
       return Buffer.from(compressed);
     } catch (error) {
-      throw new Error(`LZ4 multi-compression failed: ${error.message}`);
+      throw new Error(`MessagePack multi-compression failed: ${error.message}`);
     }
   }
 
   async decompressMultiple(compressedBuffer) {
     try {
-      // Ensure we have a Uint8Array for lz4js
-      const uint8Array = new Uint8Array(compressedBuffer);
+      // MessagePack decoding - returns the original array
+      const decompressed = msgpack.decode(compressedBuffer);
       
-      // LZ4 decompression - returns Uint8Array
-      const decompressed = lz4.decompress(uint8Array);
+      // Ensure we return an array
+      if (!Array.isArray(decompressed)) {
+        throw new Error('Decompressed data is not an array');
+      }
       
-      // Convert back to string and parse JSON
-      const jsonString = Buffer.from(decompressed).toString('utf8');
-      return JSON.parse(jsonString);
+      return decompressed;
     } catch (error) {
-      throw new Error(`LZ4 multi-decompression failed: ${error.message}`);
+      throw new Error(`MessagePack multi-decompression failed: ${error.message}`);
     }
   }
 
-  getCompressionRatio(originalData, compressedBuffer) {
-    const originalSize = Buffer.byteLength(JSON.stringify(originalData), 'utf8');
-    const compressedSize = compressedBuffer.length;
-    return originalSize / compressedSize;
+  /**
+   * Get compression ratio between original and compressed data
+   */
+  getCompressionRatio(originalSize, compressedSize) {
+    if (compressedSize === 0) return 1.0;
+    return (originalSize / compressedSize).toFixed(2);
   }
 
-  analyzeSpaceSavings(originalData, compressedBuffer) {
-    const originalSize = Buffer.byteLength(JSON.stringify(originalData), 'utf8');
-    const compressedSize = compressedBuffer.length;
-    const spaceSaved = originalSize - compressedSize;
-    const percentSaved = ((spaceSaved / originalSize) * 100).toFixed(2);
-    
-    return {
-      originalSize,
-      compressedSize,
-      spaceSaved,
-      percentSaved: parseFloat(percentSaved),
-      compressionRatio: (originalSize / compressedSize).toFixed(2)
-    };
-  }
-
-  async testCycle(containerData) {
-    try {
-      const compressed = await this.compress(containerData);
-      const decompressed = await this.decompress(compressed);
-      
-      const originalJson = JSON.stringify(containerData);
-      const decompressedJson = JSON.stringify(decompressed);
-      const isValid = originalJson === decompressedJson;
-      
-      return {
-        success: isValid,
-        original: containerData,
-        compressed,
-        decompressed,
-        analysis: this.analyzeSpaceSavings(containerData, compressed)
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error.message,
-        original: containerData,
-        compressed: null,
-        decompressed: null,
-        analysis: null
-      };
-    }
-  }
-
+  /**
+   * Format bytes for human-readable output
+   */
   formatBytes(bytes) {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  /**
+   * Test compression with sample data
+   */
+  async testCompression() {
+    const testData = {
+      containerId: "TEST12345",
+      timestamp: new Date().toISOString(),
+      sensors: {
+        temperature: 23.5,
+        humidity: 65.2,
+        pressure: 1013.25
+      },
+      location: {
+        latitude: 31.2504,
+        longitude: 28.1651
+      }
+    };
+
+    try {
+      console.log('🧪 Testing MessagePack compression...');
+      
+      const originalSize = Buffer.byteLength(JSON.stringify(testData), 'utf8');
+      const compressed = await this.compress(testData);
+      const decompressed = await this.decompress(compressed);
+      
+      const compressionRatio = this.getCompressionRatio(originalSize, compressed.length);
+      
+      console.log(`✅ MessagePack Test Results:`);
+      console.log(`   Original: ${this.formatBytes(originalSize)}`);
+      console.log(`   Compressed: ${this.formatBytes(compressed.length)}`);
+      console.log(`   Ratio: ${compressionRatio}:1`);
+      console.log(`   Data integrity: ${JSON.stringify(testData) === JSON.stringify(decompressed) ? '✅ PASS' : '❌ FAIL'}`);
+      
+      return {
+        success: true,
+        originalSize,
+        compressedSize: compressed.length,
+        compressionRatio: parseFloat(compressionRatio),
+        dataIntegrity: JSON.stringify(testData) === JSON.stringify(decompressed)
+      };
+    } catch (error) {
+      console.error('❌ MessagePack test failed:', error.message);
+      return { success: false, error: error.message };
+    }
   }
 }
 

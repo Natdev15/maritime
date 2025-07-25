@@ -17,12 +17,12 @@ import time
 import base64
 from datetime import datetime
 from locust import HttpUser, task, between, events
-import lz4.frame
+import msgpack
 
 class ProductionFlowUser(HttpUser):
     """
     HttpUser simulating real production flow
-    Local Machine → Slave (LZ4) → Mobius (M2M)
+    Local Machine → Slave (MessagePack) → Mobius (M2M)
     """
     wait_time = between(2, 5)  # 2-5 seconds between batches
 
@@ -66,23 +66,20 @@ class ProductionFlowUser(HttpUser):
 
     def compress_batch(self, containers):
         try:
-            # Convert to JSON and then compress with LZ4
-            json_data = json.dumps(containers, separators=(',', ':'))
-            json_bytes = json_data.encode('utf-8')
+            # MessagePack encoding - highly efficient binary serialization
+            msgpack_data = msgpack.packb(containers, use_bin_type=True)
             
-            # LZ4 compression
-            lz4_data = lz4.frame.compress(json_bytes, compression_level=1)
-            
-            original_size = len(json_bytes)
-            compressed_size = len(lz4_data)
+            # Calculate compression metrics
+            original_size = len(json.dumps(containers, separators=(',', ':')).encode('utf-8'))
+            compressed_size = len(msgpack_data)
             compression_ratio = original_size / compressed_size if compressed_size > 0 else 1.0
             
             payload = {
-                "compressedData": base64.b64encode(lz4_data).decode('utf-8'),
+                "compressedData": base64.b64encode(msgpack_data).decode('utf-8'),
                 "metadata": {
                     "timestamp": datetime.now().isoformat(),
                     "sourceNode": "locust-master",
-                    "compressionType": "lz4",
+                    "compressionType": "messagepack",
                     "originalSize": original_size,
                     "compressionRatio": round(compression_ratio, 2),
                     "containerCount": len(containers),
@@ -91,7 +88,7 @@ class ProductionFlowUser(HttpUser):
             }
             return payload, original_size, compressed_size, compression_ratio
         except Exception as e:
-            print(f"❌ LZ4 compression failed: {e}")
+            print(f"❌ MessagePack compression failed: {e}")
             return None, 0, 0, 1.0
 
     @task(10)
