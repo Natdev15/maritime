@@ -17,41 +17,28 @@ import time
 import base64
 from datetime import datetime
 from locust import HttpUser, task, between, events
-import brotli
+import cbor2
 
 class ProductionFlowUser(HttpUser):
     """
-    🎯 HttpUser simulating real production flow
-    Local Machine → Slave (compressed) → Mobius (M2M)
+    HttpUser simulating real production flow
+    Local Machine → Slave (CBOR) → Mobius (M2M)
     """
-    
-    # Wait time between requests (like real master node behavior)
     wait_time = between(2, 5)  # 2-5 seconds between batches
-    
+
     def on_start(self):
-        """Initialize production flow simulation"""
         print(f"🚀 Production User {id(self)} started - simulating master → slave → mobius flow")
-        
-        # Container counter for unique IDs
         self.container_counter = random.randint(10000, 99999)
-        
-        # Endpoint configuration
-        self.slave_host = self.host  # http://172.25.1.78
+        self.slave_host = self.host
         self.slave_port = 3001
         self.slave_endpoint = f"{self.slave_host}:{self.slave_port}/api/receive-compressed"
-        
-        # Statistics tracking
         self.total_containers_sent = 0
         self.total_compression_ratio = 0.0
         self.compression_samples = 0
-        
         print(f"📡 Target slave endpoint: {self.slave_endpoint}")
-    
+
     def generate_realistic_container(self):
-        """Generate realistic maritime container data"""
         self.container_counter += 1
-        
-        # Generate realistic maritime IoT data
         container_data = {
             "msisdn": f"39331553{random.randint(7800, 7999)}",
             "iso6346": f"PROD{self.container_counter:07d}",
@@ -75,80 +62,42 @@ class ProductionFlowUser(HttpUser):
             "hdop": f"{random.uniform(0.5, 3.0):.1f}",
             "timestamp": datetime.now().isoformat()
         }
-        
-        return {
-            "containerId": container_data["iso6346"],
-            "data": container_data
-        }
-    
+        return {"containerId": container_data["iso6346"], "data": container_data}
+
     def compress_batch(self, containers):
-        """
-        Compress container batch exactly like production master
-        Returns: (payload, original_size, compressed_size, compression_ratio)
-        """
         try:
-            # Convert to JSON (same as production)
-            json_data = json.dumps(containers, separators=(',', ':'))
-            original_size = len(json_data.encode('utf-8'))
-            
-            # Brotli compression with production settings
-            compressed_data = brotli.compress(
-                json_data.encode('utf-8'),
-                quality=6,
-                mode=brotli.MODE_TEXT
-            )
-            compressed_size = len(compressed_data)
-            
-            # Calculate compression ratio
+            # CBOR encode the batch
+            cbor_data = cbor2.dumps(containers)
+            original_size = len(json.dumps(containers, separators=(',', ':')).encode('utf-8'))
+            compressed_size = len(cbor_data)
             compression_ratio = original_size / compressed_size if compressed_size > 0 else 1.0
-            
-            # Create production-like payload
             payload = {
-                "compressedData": base64.b64encode(compressed_data).decode('utf-8'),
+                "compressedData": base64.b64encode(cbor_data).decode('utf-8'),
                 "metadata": {
                     "timestamp": datetime.now().isoformat(),
                     "sourceNode": "locust-master",
-                    "compressionType": "brotli",
+                    "compressionType": "cbor",
                     "originalSize": original_size,
                     "compressionRatio": round(compression_ratio, 2),
                     "containerCount": len(containers),
                     "batchId": f"BATCH_{int(time.time() * 1000)}"
                 }
             }
-            
             return payload, original_size, compressed_size, compression_ratio
-            
         except Exception as e:
             print(f"❌ Compression failed: {e}")
             return None, 0, 0, 1.0
-    
-    @task(10)  # High weight - main production flow
+
+    @task(10)
     def send_batch_to_slave(self):
-        """
-        🎯 Main production flow task
-        Simulates master sending compressed batch to slave
-        """
         batch_start_time = time.time()
-        
-        # Generate realistic batch size (3-8 containers like production)
         batch_size = random.randint(3, 8)
-        containers = []
-        
-        for _ in range(batch_size):
-            containers.append(self.generate_realistic_container())
-        
-        # Compress batch
+        containers = [self.generate_realistic_container() for _ in range(batch_size)]
         payload, original_size, compressed_size, compression_ratio = self.compress_batch(containers)
-        
-        if not payload:
-            return
-        
-        # Track statistics
+        if not payload: return
         self.total_containers_sent += batch_size
         self.total_compression_ratio += compression_ratio
         self.compression_samples += 1
-        
-        # Send compressed data to slave (this triggers slave → mobius flow)
         with self.client.post(
             f":{self.slave_port}/api/receive-compressed",
             json=payload,
@@ -159,61 +108,41 @@ class ProductionFlowUser(HttpUser):
                 "X-Batch-Size": str(batch_size)
             },
             catch_response=True,
-            name="production_flow"  # This will show in Locust metrics
+            name="production_flow"
         ) as response:
-            
             total_time = int((time.time() - batch_start_time) * 1000)
-            
             if response.status_code == 200:
-                # Success - slave processed and forwarded to Mobius
                 avg_compression = self.total_compression_ratio / self.compression_samples
-                
                 print(f"✅ PRODUCTION: {batch_size} containers → slave → mobius in {total_time}ms")
                 print(f"   📊 Compression: {original_size}B → {compressed_size}B ({compression_ratio:.1f}:1)")
                 print(f"   📈 Session avg compression: {avg_compression:.1f}:1 | Total containers: {self.total_containers_sent}")
-                
                 response.success()
-                
-                # Custom metric for compression efficiency
                 events.request.fire(
-                    request_type="COMPRESSION",
-                    name="compression_ratio",
-                    response_time=compression_ratio * 100,  # Scale for visibility
-                    response_length=compressed_size,
-                    exception=None,
-                    context={}
+                    request_type="COMPRESSION", name="compression_ratio",
+                    response_time=compression_ratio * 100, response_length=compressed_size,
+                    exception=None, context={}
                 )
-                
             elif response.status_code == 500:
                 print(f"⚠️ PRODUCTION: Slave processing failed (HTTP 500) after {total_time}ms")
                 print(f"   📦 Batch: {batch_size} containers, {original_size}B original data")
                 response.failure("Slave processing/forwarding failed")
-                
             else:
                 print(f"❌ PRODUCTION: Unexpected response {response.status_code} after {total_time}ms")
                 response.failure(f"Unexpected status: {response.status_code}")
-    
-    @task(2)  # Lower weight - health check
+
+    @task(2)
     def health_check_slave(self):
-        """
-        🔍 Health check task
-        Verifies slave is responsive
-        """
         with self.client.get(
-            f":{self.slave_port}/api/health",
-            catch_response=True,
-            name="health_check"
+            f":{self.slave_port}/api/health", catch_response=True, name="health_check"
         ) as response:
-            
             if response.status_code == 200:
                 print(f"💓 Health check: Slave is healthy")
                 response.success()
             else:
                 print(f"⚠️ Health check: Slave returned {response.status_code}")
                 response.failure("Health check failed")
-    
+
     def on_stop(self):
-        """Cleanup when user stops"""
         if self.compression_samples > 0:
             avg_compression = self.total_compression_ratio / self.compression_samples
             print(f"📊 USER {id(self)} FINAL STATS:")
@@ -221,14 +150,13 @@ class ProductionFlowUser(HttpUser):
             print(f"   Average compression ratio: {avg_compression:.1f}:1")
             print(f"   Compression samples: {self.compression_samples}")
 
-# Event listeners for custom metrics
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
     print("🚀 PRODUCTION FLOW TEST STARTED")
     print(f"📡 Target: {environment.host}:3001/api/receive-compressed")
     print(f"🔄 Flow: Locust → Slave → Mobius")
 
-@events.test_stop.add_listener  
+@events.test_stop.add_listener
 def on_test_stop(environment, **kwargs):
     print("🏁 PRODUCTION FLOW TEST COMPLETED")
     print("📊 Check metrics for 'production_flow' and 'compression_ratio'")
