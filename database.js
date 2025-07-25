@@ -74,7 +74,7 @@ class DatabaseService {
       const createTableSQL = `
         CREATE TABLE IF NOT EXISTS container_data (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
-          container_id TEXT NOT NULL,
+          container_id TEXT NOT NULL UNIQUE,
           timestamp INTEGER NOT NULL,
           compressed_data BLOB NOT NULL
         );
