@@ -61,7 +61,7 @@ class HttpClient {
           ...metadata,
           timestamp: new Date().toISOString(),
           sourceNode: 'master',
-          compressionType: 'messagepack',
+          compressionType: 'cbor',
           originalSize: metadata.originalSize || null,
           compressionRatio: metadata.compressionRatio || null
         }

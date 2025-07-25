@@ -71,145 +71,17 @@ class DatabaseService {
    */
   async createTables() {
     return new Promise((resolve, reject) => {
-      // Handle schema migration safely - check if tables exist first
-      this.db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='container_data'", async (err, row) => {
-        if (err) {
-          console.error('Error checking table existence:', err);
-          reject(err);
-          return;
-        }
-
-        try {
-          if (row) {
-            // Table exists, handle migration carefully
-            await this.handleSchemaMigration();
-          } else {
-            // Create fresh tables
-            await this.createFreshTables();
-          }
-          console.log('Database tables created/verified');
-          resolve();
-        } catch (error) {
-          console.error('Error in table creation:', error);
-          reject(error);
-        }
-      });
-    });
-  }
-
-  /**
-   * Create fresh tables (when no existing data)
-   */
-  async createFreshTables() {
-    return new Promise((resolve, reject) => {
       const createTableSQL = `
-        CREATE TABLE container_data (
+        CREATE TABLE IF NOT EXISTS container_data (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
-          container_id TEXT NOT NULL UNIQUE,
+          container_id TEXT NOT NULL,
           timestamp INTEGER NOT NULL,
           compressed_data BLOB NOT NULL
         );
 
-        CREATE INDEX idx_timestamp ON container_data(timestamp);
-        
+        CREATE INDEX IF NOT EXISTS idx_container_id ON container_data(container_id);
+        CREATE INDEX IF NOT EXISTS idx_timestamp ON container_data(timestamp);
         -- Table for persistent retry of failed forwards
-        CREATE TABLE failed_forwards (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          container_id TEXT NOT NULL UNIQUE,
-          timestamp INTEGER NOT NULL,
-          data TEXT NOT NULL,
-          last_attempt INTEGER,
-          fail_count INTEGER DEFAULT 1
-        );
-        CREATE INDEX idx_failed_timestamp ON failed_forwards(timestamp);
-      `;
-
-      this.db.exec(createTableSQL, (err) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
-  }
-
-  /**
-   * Handle schema migration for existing tables
-   */
-  async handleSchemaMigration() {
-    return new Promise((resolve, reject) => {
-      // Step 1: Check if UNIQUE constraint already exists
-      this.db.all("PRAGMA index_list(container_data)", async (err, indexes) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        const hasUniqueConstraint = indexes.some(idx => 
-          idx.name === 'idx_container_id_unique' && idx.unique === 1
-        );
-
-        if (hasUniqueConstraint) {
-          // Constraint already exists, just create missing indexes
-          await this.createMissingIndexes();
-          resolve();
-          return;
-        }
-
-        try {
-          // Step 2: Clean up duplicates before adding UNIQUE constraint
-          console.log('🔄 Cleaning up duplicate container_id values...');
-          await this.cleanupDuplicateContainerIds();
-          
-          // Step 3: Add UNIQUE constraint
-          await this.addUniqueConstraints();
-          
-          resolve();
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-  }
-
-  /**
-   * Clean up duplicate container_id values, keeping the latest timestamp
-   */
-  async cleanupDuplicateContainerIds() {
-    return new Promise((resolve, reject) => {
-      const cleanupSQL = `
-        DELETE FROM container_data 
-        WHERE id NOT IN (
-          SELECT MAX(id) 
-          FROM container_data 
-          GROUP BY container_id
-        )
-      `;
-
-      this.db.run(cleanupSQL, function(err) {
-        if (err) {
-          reject(err);
-        } else {
-          if (this.changes > 0) {
-            console.log(`✅ Removed ${this.changes} duplicate container records`);
-          }
-          resolve();
-        }
-      });
-    });
-  }
-
-  /**
-   * Add UNIQUE constraints after cleaning duplicates
-   */
-  async addUniqueConstraints() {
-    return new Promise((resolve, reject) => {
-      const constraintSQL = `
-        -- Add UNIQUE constraint for container_data
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_container_id_unique ON container_data(container_id);
-        
-        -- Create failed_forwards table if it doesn't exist
         CREATE TABLE IF NOT EXISTS failed_forwards (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           container_id TEXT NOT NULL,
@@ -218,36 +90,15 @@ class DatabaseService {
           last_attempt INTEGER,
           fail_count INTEGER DEFAULT 1
         );
-        
-        -- Add UNIQUE constraint for failed_forwards
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_failed_container_id_unique ON failed_forwards(container_id);
+        CREATE INDEX IF NOT EXISTS idx_failed_container_id ON failed_forwards(container_id);
       `;
 
-      this.db.exec(constraintSQL, (err) => {
+      this.db.exec(createTableSQL, (err) => {
         if (err) {
+          console.error('Error creating tables:', err);
           reject(err);
         } else {
-          console.log('✅ UNIQUE constraints added successfully');
-          resolve();
-        }
-      });
-    });
-  }
-
-  /**
-   * Create missing indexes
-   */
-  async createMissingIndexes() {
-    return new Promise((resolve, reject) => {
-      const indexSQL = `
-        CREATE INDEX IF NOT EXISTS idx_timestamp ON container_data(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_failed_timestamp ON failed_forwards(timestamp);
-      `;
-
-      this.db.exec(indexSQL, (err) => {
-        if (err) {
-          reject(err);
-        } else {
+          console.log('Database tables created/verified');
           resolve();
         }
       });
@@ -368,8 +219,11 @@ class DatabaseService {
 
         // Use UPSERT for handling duplicates efficiently
         const stmt = db.prepare(`
-          INSERT OR REPLACE INTO container_data (container_id, timestamp, compressed_data)
+          INSERT INTO container_data (container_id, timestamp, compressed_data)
           VALUES (?, ?, ?)
+          ON CONFLICT(rowid) DO UPDATE SET
+            timestamp = excluded.timestamp,
+            compressed_data = excluded.compressed_data
         `);
 
         let errorOccurred = false;
@@ -421,10 +275,11 @@ class DatabaseService {
    */
   async addFailedForward(container) {
     return new Promise((resolve, reject) => {
-      const sql = `INSERT OR REPLACE INTO failed_forwards (container_id, timestamp, data, last_attempt, fail_count)
-                   VALUES (?, ?, ?, ?, COALESCE((SELECT fail_count FROM failed_forwards WHERE container_id = ?), 0) + 1)`;
+      const sql = `INSERT INTO failed_forwards (container_id, timestamp, data, last_attempt, fail_count)
+                   VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT(container_id) DO UPDATE SET fail_count = fail_count + 1, last_attempt = ?`;
       const now = Date.now();
-              this.db.run(sql, [container.containerId, new Date(container.timestamp).getTime(), JSON.stringify(container.data), now, container.containerId], function(err) {
+      this.db.run(sql, [container.containerId, new Date(container.timestamp).getTime(), JSON.stringify(container.data), now, now], function(err) {
         if (err) {
           reject(err);
         } else {

@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Master Node (Local Machine)
+  astrocast-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.astrocast
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_MODE=master
+      - NODE_ENV=production
+      - PORT=3000
+      - SLAVE_URL=http://172.25.1.78:3001/api/receive-compressed
+    restart: unless-stopped
+    networks:
+      - astrocast-network
+    profiles:
+      - master
+
+  # Slave Node (VM)
+  astrocast-slave:
+    build:
+      context: .
+      dockerfile: Dockerfile.astrocast
+    ports:
+      - "3001:3000"
+    volumes:
+      - slave_data:/app/data
+    environment:
+      - NODE_MODE=slave
+      - NODE_ENV=production
+      - PORT=3000
+      - MOBIUS_URL=http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4
+    restart: unless-stopped
+    networks:
+      - astrocast-network
+    profiles:
+      - slave
+
+volumes:
+  slave_data:
+    driver: local
+
+networks:
+  astrocast-network:
+    driver: bridge 
