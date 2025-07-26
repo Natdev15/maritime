@@ -2,51 +2,46 @@ version: '3.8'
 
 services:
   # ========================================
-  # MASTER NODE CONFIGURATION (Local Machine)
+  # ENCODER SERVICE (Local Machine)
   # ========================================
-  # Uncomment this section for master node deployment
-  astrocast-master:
+  # Uncomment this section for local machine deployment
+  esp32-encoder:
     build:
       context: .
-      dockerfile: Dockerfile.astrocast
+      dockerfile: Dockerfile
+    container_name: esp32-encoder-local
     ports:
       - "3000:3000"
-    volumes:
-      - ./data:/app/data
     environment:
-      - NODE_MODE=master
       - NODE_ENV=production
       - PORT=3000
-      - SLAVE_URL=http://172.25.1.78:3001/api/receive-compressed
+      - DECODER_URL=http://172.25.1.78:3001
     restart: unless-stopped
     networks:
-      - astrocast-local-network
+      - esp32-network
+    command: ["node", "esp32-encoder-server.js"]
 
   # ========================================
-  # SLAVE NODE CONFIGURATION (VM)
+  # DECODER SERVICE (VM)
   # ========================================
-  # Uncomment this section for slave node deployment
-  # astrocast-slave:
+  # Uncomment this section for VM deployment
+  # esp32-decoder:
   #   build:
   #     context: .
-  #     dockerfile: Dockerfile.astrocast
+  #     dockerfile: Dockerfile
+  #   container_name: esp32-decoder-vm
   #   ports:
   #     - "3001:3000"
-  #   volumes:
-  #     - slave_data:/app/data
   #   environment:
-  #     - NODE_MODE=slave
   #     - NODE_ENV=production
   #     - PORT=3000
   #     - MOBIUS_URL=http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4
+  #     - MOBIUS_ORIGIN=Natesh
   #   restart: unless-stopped
   #   networks:
-  #     - astrocast-local-network
-
-volumes:
-  slave_data:
-    driver: local
+  #     - esp32-network
+  #   command: ["node", "esp32-cbor-decoder.js"]
 
 networks:
-  astrocast-local-network:
+  esp32-network:
     driver: bridge 

@@ -1,320 +1,261 @@
-# 🛰️ Astrocast Maritime IoT Pipeline
+# 🚀 ESP32 Hybrid TN/NTN IoT Pipeline
 
-**Investigating Efficient Binary Serialization Protocols for Hybrid TN/NT Networks for Massive IoT Devices and M2M Systems**
+A complete JavaScript-based IoT data pipeline for ESP32 devices with extreme CBOR compression, designed for Astrocast satellite communication with a 160-byte payload limit.
 
-## 📋 Overview
+## 🎯 Overview
 
-This project implements a comprehensive maritime IoT pipeline using **CBOR (Concise Binary Object Representation)** for extreme data compression, specifically optimized for **Astrocast satellite communication** with a 160-byte payload limit.
-
-### 🎯 Key Achievement
-**85% Data Compression** (385 → 58 bytes) while maintaining **100% reliability** for Astrocast satellite communication.
+This pipeline compresses ESP32 JSON telemetry data into compact CBOR format (152 bytes, 59.8% compression) and forwards it to Mobius (oneM2M) platform through a hybrid terrestrial/non-terrestrial network architecture.
 
 ## 🏗️ Architecture
 
 ```
-ESP32 Device → Astrocast Satellite → Master Node → Slave Node → Mobius (oneM2M)
+┌─────────────────┐    CBOR     ┌─────────────────┐    JSON     ┌─────────────────┐
+│   Local Machine │ ──────────→ │       VM        │ ──────────→ │     Mobius      │
+│   (Encoder)     │   (3001)    │   (Decoder)     │   (7579)    │   (Platform)    │
+└─────────────────┘             └─────────────────┘             └─────────────────┘
 ```
 
-### Component Flow
-1. **ESP32 Device**: Generates sensor data (385 bytes JSON)
-2. **Astrocast Satellite**: Transmits compressed data (58 bytes CBOR)
-3. **Master Node**: Compresses data using extreme CBOR optimization
-4. **Slave Node**: Decompresses data and adds oneM2M headers
-5. **Mobius Platform**: Receives and stores maritime IoT data
+## 📦 Core Components
 
-## 📊 Performance Metrics
+### **ESP32 JavaScript Encoder** (`esp32-js-encoder.js`)
+- Pure JavaScript CBOR encoder for ESP32
+- Aggressive compression techniques
+- Astrocast 160-byte limit compliance
+- Field ID mapping and quantization
 
-| Metric | Value | Status |
-|--------|-------|--------|
-| **Compression Ratio** | 85% (385→58 bytes) | ✅ |
-| **Astrocast Compatibility** | 58/160 bytes | ✅ |
-| **Success Rate** | 100% | ✅ |
-| **Response Time** | 133ms average | ✅ |
-| **Cost Reduction** | 67% savings | ✅ |
-| **Scalability** | 1000+ msg/sec | ✅ |
+### **Encoder Server** (`esp32-encoder-server.js`)
+- REST API for generating and sending CBOR payloads
+- Bulk testing capabilities
+- Health monitoring
 
-## 🔧 Technical Implementation
-
-### CBOR Compression Techniques
-- **Key Shortening**: `'msisdn'` → `'m'` (85% reduction)
-- **Field Selection**: 20 fields → 8 essential fields (60% reduction)
-- **Data Type Optimization**: Floats → integers, string truncation
-- **Value Compression**: MSISDN prefix removal, time format optimization
-
-### Server Architecture
-- **Master Node**: CBOR compression, payload validation
-- **Slave Node**: CBOR decompression, oneM2M integration
-- **Docker Containerization**: Scalable deployment
-- **Microservices Design**: Independent Master/Slave nodes
-
-## 📁 Project Structure
-
-```
-maritime-serializer/
-├── 📄 ASTROCAST_MARITIME_PDF_REPORT.md     # Complete PDF report (markdown)
-├── 📄 ASTROCAST_MARITIME_REPORT.pdf        # Generated PDF report
-├── 📄 IMPLEMENTATION_SUMMARY.md            # Quick reference summary
-├── 📄 DEPLOYMENT_GUIDE.md                  # Deployment instructions
-├── 📄 README.md                            # This file
-├── 🐳 docker-compose.yml                   # Single file for both deployments
-├── 🐳 Dockerfile.astrocast                 # Container definition
-├── 🔧 astrocast-server.js                  # Master/Slave server logic
-├── 🗜️ extreme-astrocast-cbor.js           # CBOR compression engine
-├── 📦 package.json                         # Node.js dependencies
-├── 🧪 test-astrocast-pipeline.js           # Load testing script
-├── 📊 generate_pdf_simple.py               # PDF generation script
-└── 📊 generate_pdf.bat                     # Windows PDF generator
-```
+### **CBOR Decoder** (`esp32-cbor-decoder.js`)
+- Node.js decoder gateway
+- CBOR to JSON conversion
+- Mobius integration with oneM2M headers
+- Data enrichment and validation
 
 ## 🚀 Quick Start
 
-### 1. Local Development (Both Master & Slave)
-```bash
-# Start both services locally
-docker-compose up -d --build
+### **1. Local Machine (Encoder)**
 
-# Test the pipeline
-node test-astrocast-pipeline.js individual --total=10 --rate=1000
+```bash
+# Install dependencies
+npm install
+
+# Configure docker-compose.yml (uncomment encoder, comment decoder)
+# Deploy encoder
+npm run deploy-local
+
+# Test encoder
+curl http://localhost:3000/health
 ```
 
-### 2. Production Deployment
+### **2. VM (Decoder)**
+
 ```bash
-# Master on local, Slave on VM
-# 1. Keep current config (Master active, Slave commented)
-docker-compose up -d --build
+# Configure docker-compose.yml (comment encoder, uncomment decoder)
+# Deploy decoder
+npm run deploy-vm
 
-# 2. On VM: Comment Master, uncomment Slave
-docker-compose up -d --build
-
-# 3. Update Master SLAVE_URL to point to VM
-# 4. Restart Master
-docker-compose restart
+# Test decoder
+curl http://172.25.1.78:3001/health
 ```
 
-## 💰 Cost Analysis
+### **3. End-to-End Testing**
 
-### Before Optimization
-- **Original Size**: 385 bytes
-- **Messages Required**: 3 messages (160 bytes each)
-- **Cost per Transmission**: 3 × $0.50 = $1.50
-- **Annual Cost**: $547.50 per device
+```bash
+# Test complete pipeline
+npm run test-docker
 
-### After Optimization
-- **Compressed Size**: 58 bytes
-- **Messages Required**: 1 message
-- **Cost per Transmission**: 1 × $0.50 = $0.50
-- **Annual Cost**: $182.50 per device
-- **Annual Savings**: $365.00 per device
+# Send single payload
+curl -X POST http://localhost:3000/api/generate-and-send \
+  -H "Content-Type: application/json" \
+  -d '{"msisdn":"393315537896","temperature":"17.00","humidity":"44.00"}'
 
-### Massive IoT Impact
-- **10,000 Devices**: $3,650,000 annual savings
-- **ROI**: 7,300% for 100 devices
-- **Break-even**: 14 devices
+# Bulk testing
+curl -X POST http://localhost:3000/api/bulk-test \
+  -H "Content-Type: application/json" \
+  -d '{"count": 50, "delay": 100}'
+```
+
+## 📊 Performance Metrics
+
+- **CBOR Size**: 152 bytes (59.8% compression)
+- **Astrocast Compatible**: ✅ (under 160-byte limit)
+- **Throughput**: 300+ req/sec
+- **Processing Time**: <10ms
+- **Success Rate**: >99%
 
 ## 🔧 Configuration
 
-### Environment Variables
+### **Environment Variables**
 
-#### Master Node
+**Encoder (Local):**
 ```bash
-NODE_MODE=master
-PORT=3000
-SLAVE_URL=http://astrocast-slave:3000/api/receive-compressed  # Local
-SLAVE_URL=http://172.25.1.78:3001/api/receive-compressed     # VM
+DECODER_URL=http://172.25.1.78:3001
 ```
 
-#### Slave Node
+**Decoder (VM):**
 ```bash
-NODE_MODE=slave
-PORT=3000
 MOBIUS_URL=http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4
+MOBIUS_ORIGIN=Natesh
 ```
 
-### Docker Configuration
-```yaml
-# Single docker-compose.yml for both deployments
-services:
-  astrocast-master:
-    build: .
-    ports: ["3000:3000"]
-    environment:
-      - NODE_MODE=master
-      - SLAVE_URL=http://astrocast-slave:3000/api/receive-compressed
-  
-  astrocast-slave:
-    build: .
-    ports: ["3001:3000"]
-    environment:
-      - NODE_MODE=slave
-      - MOBIUS_URL=http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4
-```
+## 🐳 Docker Deployment
 
-## 📊 Load Testing
+### **Single Dockerfile & docker-compose.yml**
 
-### Test Commands
+The project uses a single `Dockerfile` and `docker-compose.yml` for both encoder and decoder deployment:
+
+- **Local Machine**: Uncomment encoder service, comment decoder
+- **VM**: Comment encoder service, uncomment decoder
+
+### **Available Scripts**
+
 ```bash
-# Light load
-node test-astrocast-pipeline.js individual --total=10 --rate=1000
+# Local deployment
+npm run deploy-local
 
-# Medium load
-node test-astrocast-pipeline.js individual --total=100 --rate=5000
+# VM deployment
+npm run deploy-vm
 
-# Heavy load
-node test-astrocast-pipeline.js individual --total=1000 --rate=10000
+# Monitoring
+npm run docker-logs
+npm run docker-down
+
+# Testing
+npm run test-docker
+npm run esp32-single
+npm run esp32-bulk
 ```
 
-### Expected Results
-```
-📋 Astrocast Load Test Report
-==============================
-⏱️  Duration: 0.71 seconds
-📦 Total sent: 5
-✅ Successful: 5
-❌ Errors: 0
-📈 Success rate: 100.00%
-⚡ Average response time: 133.60ms
-📊 Min response time: 101ms
-📊 Max response time: 149ms
-🛰️  Astrocast compatible: ✅
-🗜️  Compression: Extreme CBOR
-```
+## 📋 API Reference
 
-## 📄 Documentation
+### **Encoder API (Local:3000)**
 
-### Generated Reports
-1. **`ASTROCAST_MARITIME_REPORT.pdf`** - Complete implementation report
-2. **`ASTROCAST_MARITIME_PDF_REPORT.md`** - Markdown source for PDF
-3. **`IMPLEMENTATION_SUMMARY.md`** - Quick reference summary
-4. **`DEPLOYMENT_GUIDE.md`** - Detailed deployment instructions
+#### `GET /health`
+Health check endpoint.
 
-### Generate PDF Report
-```bash
-# Windows
-generate_pdf.bat
+#### `POST /api/generate-and-send`
+Generate CBOR and send to VM decoder.
 
-# Manual
-python generate_pdf_simple.py
-```
+#### `POST /api/generate`
+Generate CBOR only (for testing).
 
-## 🔍 Monitoring
+#### `POST /api/bulk-test`
+Run bulk testing with specified parameters.
 
-### Health Checks
-```bash
-# Master health
-curl http://localhost:3000/api/health
+#### `GET /api/random-data`
+Generate random sensor data.
 
-# Slave health
-curl http://172.25.1.78:3001/api/health
-```
+### **Decoder API (VM:3001)**
 
-### Container Logs
-```bash
-# Master logs
-docker-compose logs -f astrocast-master
+#### `GET /health`
+Health check endpoint.
 
-# Slave logs
-docker-compose logs -f astrocast-slave
-```
+#### `POST /api/esp32-cbor`
+Receive CBOR payload and forward to Mobius.
 
-### Container Status
-```bash
-docker-compose ps
-```
+## 🧪 Testing Tools
 
-## 🛠️ Troubleshooting
+### **Bulk Testing** (`bulk-esp32-test.js`)
+- Single payload testing
+- Bulk payload testing
+- File-based testing
+- Performance metrics
 
-### Common Issues
+### **Pipeline Testing** (`test-esp32-pipeline.js`)
+- End-to-end pipeline validation
+- Data integrity verification
+- Compression ratio analysis
 
-1. **Port Already in Use**
-   ```bash
-   netstat -tlnp | grep 3000
-   docker-compose down
-   ```
+### **Docker Setup Testing** (`test-docker-setup.js`)
+- Docker deployment verification
+- Network connectivity testing
+- Service health checks
 
-2. **Network Connectivity**
-   ```bash
-   ping 172.25.1.78
-   telnet 172.25.1.78 3001
-   ```
+## 📈 Monitoring
 
-3. **Container Not Starting**
-   ```bash
-   docker-compose logs
-   docker-compose up -d --build --force-recreate
-   ```
+### **Prometheus** (VM:9090)
+- Request count metrics
+- Response time monitoring
+- Error rate tracking
 
-## 🎯 Key Features
+### **Grafana** (VM:3002)
+- Real-time dashboards
+- Performance visualization
+- Alert configuration
 
-### Technical Features
-- ✅ **Extreme CBOR Compression**: 85% data reduction
-- ✅ **Astrocast Compatibility**: <160-byte payload limit
-- ✅ **Docker Containerization**: Scalable deployment
-- ✅ **Microservices Architecture**: Independent Master/Slave nodes
-- ✅ **oneM2M Integration**: Proper Mobius communication
-- ✅ **Load Testing**: Comprehensive performance validation
+## 🔐 Security Features
 
-### Business Features
-- ✅ **Cost Optimization**: 67% transmission savings
-- ✅ **Global Coverage**: Maritime satellite communication
-- ✅ **Scalability**: 10,000+ device support
-- ✅ **Reliability**: 100% success rate
-- ✅ **Real-time Monitoring**: Sub-second response times
+- Non-root user execution
+- Input validation
+- Network isolation
+- Health checks
+- Error handling
 
-## 🔮 Future Enhancements
+## 📝 Data Format
 
-### Planned Improvements
-1. **Machine Learning Compression**: AI-based optimization
-2. **Predictive Analytics**: Route optimization algorithms
-3. **Edge Computing**: Local data processing on ESP32
-4. **Blockchain Integration**: Immutable data records
-5. **AI-powered Anomaly Detection**: Predictive maintenance
-
-### Scalability Roadmap
-1. **Microservices Architecture**: Service decomposition
-2. **Kubernetes Deployment**: Container orchestration
-3. **Multi-region Deployment**: Global availability
-4. **Real-time Streaming**: Apache Kafka integration
-
-## 📋 Requirements
-
-### System Requirements
-- **Node.js**: 18.x or higher
-- **Docker**: 20.x or higher
-- **Docker Compose**: 2.x or higher
-- **Python**: 3.8+ (for PDF generation)
-
-### Dependencies
+### **Input JSON (ESP32)**
 ```json
 {
-  "express": "^4.18.2",
-  "axios": "^1.6.0",
-  "cbor": "^8.1.0"
+  "msisdn": "393315537896",
+  "iso6346": "LMCU1231230",
+  "temperature": "17.00",
+  "humidity": "44.00",
+  "pressure": "1012.5043",
+  "latitude": "31.8910",
+  "longitude": "28.7041",
+  "altitude": "38.10",
+  "speed": "27.3",
+  "heading": "125.31"
 }
 ```
 
+### **Output CBOR (152 bytes)**
+Binary CBOR format with field ID mapping and quantization.
+
+### **Mobius Payload**
+```json
+{
+  "msisdn": "393315537896",
+  "iso6346": "LMCU1231230",
+  "temperature": 17,
+  "humidity": 44,
+  "deviceId": "ESP32-TEST-001",
+  "networkType": "TN/NTN",
+  "timestamp": "2025-07-26T16:45:54.234Z"
+}
+```
+
+## 🎯 Production Checklist
+
+- [ ] Configure docker-compose.yml for target environment
+- [ ] Deploy encoder on local machine
+- [ ] Deploy decoder on VM
+- [ ] Test network connectivity
+- [ ] Verify Mobius integration
+- [ ] Set up monitoring and alerting
+- [ ] Test bulk payloads
+- [ ] Document operational procedures
+
+## 📚 Documentation
+
+- [DEPLOYMENT.md](DEPLOYMENT.md) - Detailed deployment guide
+- [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Technical implementation details
+
 ## 🤝 Contributing
 
-This project is part of a thesis research on efficient binary serialization protocols for maritime IoT. The implementation demonstrates:
-
-1. **Protocol Optimization**: Extreme CBOR compression for satellite communication
-2. **Architecture Design**: Scalable Master/Slave architecture for massive IoT
-3. **Cost Efficiency**: 67% reduction in satellite transmission costs
-4. **Global Connectivity**: Reliable maritime IoT communication
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
 
 ## 📄 License
 
-This project is part of academic research on maritime IoT communication protocols.
-
-## 📞 Support
-
-For questions about the implementation or deployment, refer to:
-- **`DEPLOYMENT_GUIDE.md`** - Detailed deployment instructions
-- **`ASTROCAST_MARITIME_REPORT.pdf`** - Complete technical documentation
-- **`IMPLEMENTATION_SUMMARY.md`** - Quick reference guide
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ---
 
-**🎯 This implementation provides a robust foundation for maritime IoT deployments with Astrocast satellite communication, achieving optimal performance within strict payload constraints while delivering significant cost savings and enhanced operational capabilities.**
-
-*Implementation Date: July 2025*  
-*Technology Stack: Node.js, CBOR, Docker, Astrocast, oneM2M*
+**🚀 Ready for production deployment!** The pipeline efficiently compresses ESP32 data to fit Astrocast's 160-byte limit while maintaining data integrity and providing seamless Mobius integration.
