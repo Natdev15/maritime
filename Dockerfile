@@ -32,4 +32,4 @@ USER nodejs
 EXPOSE 3000
 
 # Default command - will be overridden by docker-compose
-CMD ["node", "esp32-encoder-server.js"] 
+CMD ["node", "esp32-encoder.js"] 

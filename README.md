@@ -17,16 +17,12 @@ This pipeline compresses ESP32 JSON telemetry data into compact CBOR format (152
 
 ## 📦 Core Components
 
-### **ESP32 JavaScript Encoder** (`esp32-js-encoder.js`)
-- Pure JavaScript CBOR encoder for ESP32
+### **ESP32 Encoder** (`esp32-encoder.js`)
+- Single consolidated encoder (CBOR encoding + Express server)
 - Aggressive compression techniques
 - Astrocast 160-byte limit compliance
 - Field ID mapping and quantization
-
-### **Encoder Server** (`esp32-encoder-server.js`)
-- REST API for generating and sending CBOR payloads
-- Bulk testing capabilities
-- Health monitoring
+- REST API for receiving JSON and sending CBOR to decoder
 
 ### **CBOR Decoder** (`esp32-cbor-decoder.js`)
 - Node.js decoder gateway
@@ -65,17 +61,15 @@ curl http://172.25.1.78:3001/health
 
 ```bash
 # Test complete pipeline
-npm run test-docker
+npm run test-complete
 
 # Send single payload
-curl -X POST http://localhost:3000/api/generate-and-send \
+curl -X POST http://localhost:3000/api/encode \
   -H "Content-Type: application/json" \
   -d '{"msisdn":"393315537896","temperature":"17.00","humidity":"44.00"}'
 
-# Bulk testing
-curl -X POST http://localhost:3000/api/bulk-test \
-  -H "Content-Type: application/json" \
-  -d '{"count": 50, "delay": 100}'
+# Test with sample data
+curl -X POST http://localhost:3000/api/test
 ```
 
 ## 📊 Performance Metrics

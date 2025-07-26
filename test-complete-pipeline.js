@@ -1,20 +1,13 @@
-/**
- * Bulk ESP32 Testing Script
- * Send single or multiple CBOR payloads to the decoder for testing
- */
-
 const axios = require('axios');
-const { ESP32JSCBOREncoder } = require('./esp32-js-encoder.js');
 
-// node bulk-esp32-test.js bulk --total=100 --records=100
-// node bulk-esp32-test.js individual --total=100
-// node bulk-esp32-test.js bulk --total=100 --records=50 --rate=200
-// node bulk-esp32-test.js individual --total=100 --records=100 --rate=10000
+// node test-complete-pipeline.js bulk --total=100 --records=100
+// node test-complete-pipeline.js individual --total=100
+// node test-complete-pipeline.js bulk --total=100 --records=50 --rate=200
+// node test-complete-pipeline.js individual --total=100 --records=100 --rate=10000
 
-class ESP32LoadTester {
+class CompletePipelineTester {
   constructor(options = {}) {
-    this.decoderUrl = 'http://172.25.1.78:3001'; // ESP32 decoder endpoint
-    this.encoder = new ESP32JSCBOREncoder();
+    this.encoderUrl = 'http://localhost:3000'; // Encoder (Master Node) endpoint
     this.totalDevices = options.totalDevices || 100; // Number of unique ESP32 devices
     this.recordsPerDevice = options.recordsPerDevice || 50; // Records per device
     this.batchSize = options.batchSize || 2000; // Devices per batch (for bulk mode)
@@ -84,7 +77,7 @@ class ESP32LoadTester {
     return allRecords;
   }
 
-  // Send a batch of ESP32 CBOR payloads
+  // Send a batch of ESP32 JSON payloads to encoder
   async sendBatch(devices) {
     try {
       const results = [];
@@ -93,35 +86,24 @@ class ESP32LoadTester {
 
       for (const deviceData of devices) {
         try {
-          // Encode to CBOR
-          const encodeResult = this.encoder.encodeSensorData(deviceData);
-          if (!encodeResult.success) {
-            errors++;
-            continue;
-          }
-
-          // Send to decoder
-          const response = await axios.post(`${this.decoderUrl}/api/esp32-cbor`, encodeResult.cborBuffer, {
-            headers: {
-              'Content-Type': 'application/octet-stream'
-            },
-            timeout: 10000
-          });
-
-          if (response.data.success) {
+          const result = await this.sendSingle(deviceData);
+          if (result.success) {
             processed++;
           } else {
             errors++;
           }
+          results.push(result);
         } catch (error) {
           errors++;
+          results.push({ success: false, error: error.message });
         }
       }
 
       return {
         success: true,
         processed,
-        errors
+        errors,
+        results
       };
     } catch (error) {
       console.error(`Batch error: ${error.message}`);
@@ -132,28 +114,23 @@ class ESP32LoadTester {
     }
   }
 
-  // Send individual ESP32 CBOR payload
+  // Send individual ESP32 JSON payload to encoder
   async sendSingle(deviceData) {
     try {
-      // Encode to CBOR
-      const encodeResult = this.encoder.encodeSensorData(deviceData);
-      if (!encodeResult.success) {
-        return { success: false, error: encodeResult.error };
-      }
-
-      // Send to decoder
-      const response = await axios.post(`${this.decoderUrl}/api/esp32-cbor`, encodeResult.cborBuffer, {
+      const response = await axios.post(`${this.encoderUrl}/api/encode`, deviceData, {
         headers: {
-          'Content-Type': 'application/octet-stream'
+          'Content-Type': 'application/json',
+          'device-id': `ESP32_${deviceData.iso6346}`,
+          'network-type': 'astrocast',
+          'timestamp': deviceData.timestamp
         },
-        timeout: 5000
+        timeout: 10000
       });
-
+      
       return { 
         success: response.data.success, 
         data: response.data,
-        encodedSize: encodeResult.size,
-        compressionRatio: encodeResult.compressionRatio
+        stats: response.data.stats
       };
     } catch (error) {
       return { success: false, error: error.message };
@@ -164,7 +141,7 @@ class ESP32LoadTester {
   async runIndividualLoadTest() {
     const totalRecords = this.totalDevices * this.recordsPerDevice;
     
-    console.log('🔄 Starting Individual ESP32 Load Test (Rate Controlled)');
+    console.log('🔄 Starting Individual Complete Pipeline Load Test (Rate Controlled)');
     console.log(`📱 Devices: ${this.totalDevices}`);
     console.log(`📊 Records per device: ${this.recordsPerDevice}`);
     console.log(`🎯 Total records: ${totalRecords}`);
@@ -178,7 +155,8 @@ class ESP32LoadTester {
       startTime: Date.now(),
       responseTimes: [],
       totalEncodedSize: 0,
-      compressionRatios: []
+      compressionRatios: [],
+      totalProcessingTime: 0
     };
 
     // Generate all records
@@ -199,9 +177,10 @@ class ESP32LoadTester {
         
         if (result.success) {
           stats.totalProcessed++;
-          if (result.encodedSize) {
-            stats.totalEncodedSize += result.encodedSize;
-            stats.compressionRatios.push(result.compressionRatio);
+          if (result.stats) {
+            stats.totalEncodedSize += result.stats.encodedSize || 0;
+            stats.compressionRatios.push(result.stats.compressionRatio || 0);
+            stats.totalProcessingTime += result.data.processingTime || 0;
           }
         } else {
           stats.totalErrors++;
@@ -236,13 +215,13 @@ class ESP32LoadTester {
     return stats;
   }
 
-  // Get decoder statistics
-  async getDecoderStats() {
+  // Get encoder statistics
+  async getEncoderStats() {
     try {
-      const response = await axios.get(`${this.decoderUrl}/health`);
+      const response = await axios.get(`${this.encoderUrl}/health`);
       return response.data;
     } catch (error) {
-      console.error('Failed to get decoder stats:', error.message);
+      console.error('Failed to get encoder stats:', error.message);
       return null;
     }
   }
@@ -254,9 +233,11 @@ class ESP32LoadTester {
     const successRate = (stats.totalProcessed / stats.totalSent) * 100;
     const avgCompression = stats.compressionRatios.length > 0 ? 
       stats.compressionRatios.reduce((a, b) => a + b, 0) / stats.compressionRatios.length : 0;
+    const avgProcessingTime = stats.totalProcessed > 0 ? 
+      stats.totalProcessingTime / stats.totalProcessed : 0;
 
     console.log('\n' + '='.repeat(60));
-    console.log(`📋 ${testType} ESP32 Load Test Results`);
+    console.log(`📋 ${testType} Complete Pipeline Load Test Results`);
     console.log('='.repeat(60));
     console.log(`⏱️  Duration: ${elapsed.toFixed(2)} seconds`);
     console.log(`📱 Total sent: ${stats.totalSent}`);
@@ -270,6 +251,7 @@ class ESP32LoadTester {
       console.log(`🗜️  Average CBOR size: ${avgSize.toFixed(1)} bytes`);
       console.log(`📉 Average compression: ${avgCompression.toFixed(1)}%`);
       console.log(`🚀 Astrocast compatible: ${avgSize <= 160 ? '✅' : '❌'}`);
+      console.log(`⚡ Average processing time: ${avgProcessingTime.toFixed(0)}ms`);
     }
     
     if (stats.responseTimes && stats.responseTimes.length > 0) {
@@ -316,22 +298,23 @@ async function main() {
     }
   }
   
-  const tester = new ESP32LoadTester(options);
+  const tester = new CompletePipelineTester(options);
   
-  console.log('🚀 ESP32 CBOR Load Tester');
-  console.log('==========================');
+  console.log('🚀 ESP32 Complete Pipeline Load Tester');
+  console.log('=======================================');
   console.log(`📱 Total devices: ${tester.totalDevices}`);
   console.log(`📊 Records per device: ${tester.recordsPerDevice}`);
   console.log(`🎯 Target rate: ${tester.devicesPerSecond}/second\n`);
 
-  // Check if decoder is running
+  // Check if encoder is running
   try {
-    const health = await axios.get(`${tester.decoderUrl}/health`);
-    console.log('✅ ESP32 Decoder is running');
+    const health = await axios.get(`${tester.encoderUrl}/health`);
+    console.log('✅ ESP32 Encoder is running');
     console.log(`📊 Service: ${health.data.service}`);
+    console.log(`📡 Decoder URL: ${health.data.decoderUrl}`);
     console.log(`⏱️  Uptime: ${((health.data.uptime || 0) / 1000).toFixed(0)}s\n`);
   } catch (error) {
-    console.error('❌ ESP32 Decoder not reachable. Please start the decoder first.');
+    console.error('❌ ESP32 Encoder not reachable. Please start the encoder first.');
     process.exit(1);
   }
   
@@ -383,13 +366,13 @@ async function main() {
       tester.printReport(stats, 'Bulk');
     }
 
-    // Get final decoder stats
-    console.log('\n📊 Final Decoder Statistics:');
-    const decoderStats = await tester.getDecoderStats();
-    if (decoderStats) {
-      console.log(`📱 Service: ${decoderStats.service}`);
-      console.log(`⏱️  Uptime: ${((decoderStats.uptime || 0) / 1000).toFixed(0)}s`);
-      console.log(`🔗 Endpoint: ${tester.decoderUrl}`);
+    // Get final encoder stats
+    console.log('\n📊 Final Encoder Statistics:');
+    const encoderStats = await tester.getEncoderStats();
+    if (encoderStats) {
+      console.log(`📱 Service: ${encoderStats.service}`);
+      console.log(`📡 Decoder URL: ${encoderStats.decoderUrl}`);
+      console.log(`⏱️  Uptime: ${((encoderStats.uptime || 0) / 1000).toFixed(0)}s`);
     }
 
   } catch (error) {
@@ -400,8 +383,8 @@ async function main() {
 
 // Handle script execution
 if (require.main === module) {
-  console.log('🚀 ESP32 CBOR Load Tester');
-  console.log('Usage: node bulk-esp32-test.js [testType] [options]');
+  console.log('🚀 ESP32 Complete Pipeline Load Tester');
+  console.log('Usage: node test-complete-pipeline.js [testType] [options]');
   console.log('');
   console.log('Test Types:');
   console.log('  bulk       - Send ESP32 devices in batches (default)');
@@ -413,12 +396,12 @@ if (require.main === module) {
   console.log('  --rate=N     - Target devices per second (default: 500)');
   console.log('');
   console.log('Examples:');
-  console.log('  node bulk-esp32-test.js bulk --total=1000 --records=100');
-  console.log('  node bulk-esp32-test.js individual --total=50');
-  console.log('  node bulk-esp32-test.js bulk --total=500 --records=50 --rate=200');
+  console.log('  node test-complete-pipeline.js bulk --total=1000 --records=100');
+  console.log('  node test-complete-pipeline.js individual --total=50');
+  console.log('  node test-complete-pipeline.js bulk --total=500 --records=50 --rate=200');
   console.log('');
   
   main().catch(console.error);
 }
 
-module.exports = ESP32LoadTester; 
+module.exports = CompletePipelineTester; 

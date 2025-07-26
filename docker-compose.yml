@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
     networks:
       - esp32-network
-    command: ["node", "esp32-encoder-server.js"]
+    command: ["node", "esp32-encoder.js"]
 
   # ========================================
   # DECODER SERVICE (VM)

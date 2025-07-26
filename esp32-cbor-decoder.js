@@ -1,8 +1,7 @@
 /**
- * ESP32 CBOR Decoder Gateway for Hybrid TN/NTN IoT Pipeline
+ * ESP32 CBOR Decoder (Slave Node)
  * 
- * This microservice decodes CBOR payloads from ESP32 devices,
- * applies de-quantization, enriches with metadata, and forwards to Mobius (oneM2M)
+ * Decodes CBOR payloads from ESP32 devices and forwards to Mobius platform
  */
 
 const express = require('express');
@@ -12,164 +11,123 @@ const cors = require('cors');
 
 class ESP32CBORDecoder {
     constructor() {
-        // Field ID mappings (matching encoder)
+        // Complete field ID mappings for CBOR decoding (ALL fields)
         this.fieldMapping = {
-            0: 'msisdn',
-            1: 'iso6346',
-            2: 'time',
-            3: 'rssi',
-            4: 'cgi',
-            5: 'bat-soc',
-            6: 'acc',
-            7: 'temperature',
-            8: 'humidity',
-            9: 'pressure',
-            10: 'door',
-            11: 'latitude',
-            12: 'longitude',
-            13: 'altitude',
-            14: 'speed',
-            15: 'heading'
-            // Removed: ble-m, gnss, nsat, hdop for space
+            0: 'msisdn', 1: 'iso6346', 2: 'time', 3: 'rssi', 4: 'cgi',
+            5: 'bat-soc', 6: 'acc', 7: 'temperature', 8: 'humidity',
+            9: 'pressure', 10: 'door', 11: 'latitude', 12: 'longitude',
+            13: 'altitude', 14: 'speed', 15: 'heading',
+            16: 'ble-m', 17: 'gnss', 18: 'nsat', 19: 'hdop'
         };
         
-        // Quantization factors (matching encoder)
+        // Maximum quantization factors (matching encoder)
         this.quantizationFactors = {
-            temperature: 1,     // No quantization
-            humidity: 1,        // No quantization
-            pressure: 100,      // Very reduced
-            acc: 10,            // Very reduced
-            latitude: 100,      // Very reduced
-            longitude: 100,     // Very reduced
-            altitude: 1,        // No quantization
-            speed: 1,           // No quantization
-            heading: 1          // No quantization
+            temperature: 100, humidity: 100, pressure: 1000, acc: 100,
+            latitude: 1000, longitude: 1000, altitude: 10, speed: 10, heading: 10,
+            hdop: 10
         };
         
-        // CBOR version and codec support
-        this.supportedVersions = [0x01];
-        this.supportedCodecs = [0x01];
+        // Mobius configuration
+        this.mobiusUrl = process.env.MOBIUS_URL || 'http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4';
+        this.mobiusOrigin = process.env.MOBIUS_ORIGIN || 'Natesh';
     }
-    
+
     /**
      * De-quantize numeric values
      */
-    dequantizeValue(fieldName, quantizedValue) {
+    dequantizeValue(fieldName, value) {
         const factor = this.quantizationFactors[fieldName];
-        if (factor) {
-            return quantizedValue / factor;
+        if (factor && typeof value === 'number') {
+            return value / factor;
         }
-        return quantizedValue;
+        return value;
     }
-    
+
     /**
-     * Reconstruct MSISDN from optimized value
+     * Reconstruct MSISDN from optimized format
      */
     reconstructMSISDN(optimizedValue) {
         if (typeof optimizedValue === 'number') {
-            // Handle 4-digit format (more aggressive encoding)
-            const lastDigits = String(optimizedValue).padStart(4, '0');
-            return `39331553${lastDigits}`; // Reconstruct with common prefix
+            // Add back the "39" prefix and pad to full length
+            return `393315537${String(optimizedValue).padStart(3, '0')}`;
         }
         return optimizedValue;
     }
-    
+
     /**
-     * Reconstruct time from optimized value
+     * Reconstruct time from optimized format
      */
     reconstructTime(optimizedValue) {
-        const timeStr = optimizedValue.toString().padStart(8, '0');
-        // Convert "20042300" back to "200423 002014.0" format
-        const date = timeStr.substring(0, 6); // YYMMDD
-        const hour = timeStr.substring(6, 8); // HH
-        return `${date} ${hour}0014.0`; // Approximate reconstruction
+        if (typeof optimizedValue === 'number') {
+            const timeStr = String(optimizedValue);
+            const year = timeStr.substring(0, 4);
+            const month = timeStr.substring(4, 6);
+            const day = timeStr.substring(6, 8);
+            return `${year}${month}${day} 000000.0`;
+        }
+        return optimizedValue;
     }
-    
+
     /**
-     * Reconstruct CGI from array components
+     * Reconstruct CGI from array format
      */
     reconstructCGI(cgiArray) {
         if (Array.isArray(cgiArray) && cgiArray.length === 4) {
-            const [mcc, mnc, lac, cellid] = cgiArray;
-            // Convert cellid back to hex
-            const cellidHex = cellid.toString(16).toUpperCase();
-            return `${mcc}-${mnc.toString().padStart(2, '0')}-${lac}-${cellidHex}`;
+            const [mcc, mnc, lac, cellId] = cgiArray;
+            return `${mcc}-${mnc}-${lac}-${cellId.toString(16).toUpperCase()}`;
         }
-        return cgiArray; // Return as-is if not array
+        return cgiArray;
     }
-    
+
     /**
-     * Reconstruct accelerometer data from quantized array
+     * Reconstruct accelerometer from quantized array
      */
     reconstructAccelerometer(accArray) {
         if (Array.isArray(accArray) && accArray.length === 3) {
             const [x, y, z] = accArray;
-            // Use dequantizeValue for proper dequantization
-            const x_val = this.dequantizeValue('acc', x).toFixed(4);
-            const y_val = this.dequantizeValue('acc', y).toFixed(4);
-            const z_val = this.dequantizeValue('acc', z).toFixed(4);
-            return `${x_val} ${y_val} ${z_val}`;
+            return `${(x / 100).toFixed(4)} ${(y / 100).toFixed(4)} ${(z / 100).toFixed(4)}`;
         }
         return accArray;
     }
-    
+
     /**
-     * Decode CBOR payload from ESP32
+     * Decode CBOR payload to JSON
      */
     decodeCBORPayload(cborBuffer) {
         try {
-            console.log('🔄 Decoding ESP32 CBOR payload...');
-            
             // Decode CBOR
-            const decoded = cbor.decode(cborBuffer);
+            const decodedData = cbor.decode(cborBuffer);
             
-            if (!decoded || typeof decoded !== 'object') {
-                throw new Error('Invalid CBOR payload structure');
-            }
+            // Extract version and codec
+            const version = decodedData[0xFF];
+            const codec = decodedData[0xFE];
             
-            console.log('🔍 Decoded CBOR structure:', Object.keys(decoded));
+            console.log('📋 Version:', version);
+            console.log('📋 Codec:', codec);
             
-            // Check version and codec compatibility
-            const version = decoded[0xFF]; // Version field (0xFF)
-            const codec = decoded[0xFE];   // Codec field (0xFE)
+            // Reconstruct original data
+            const reconstructedData = {};
             
-            console.log('📋 Version:', version, 'Codec:', codec);
-            
-            if (!this.supportedVersions.includes(version)) {
-                throw new Error(`Unsupported CBOR version: ${version}`);
-            }
-            
-            if (!this.supportedCodecs.includes(codec)) {
-                throw new Error(`Unsupported codec: ${codec}`);
-            }
-            
-            // Map field IDs to human-readable names and de-quantize
-            const decodedData = {};
-            
-            for (const [fieldId, value] of Object.entries(decoded)) {
-                const fieldName = this.fieldMapping[parseInt(fieldId)];
+            for (const [fieldId, fieldName] of Object.entries(this.fieldMapping)) {
+                const value = decodedData[fieldId];
                 
-                if (fieldName) {
-                    let processedValue = value;
+                if (value !== undefined) {
+                    let reconstructedValue = value;
                     
-                    // Apply field-specific processing
+                    // Apply field-specific reconstruction
                     switch (fieldName) {
                         case 'msisdn':
-                            processedValue = this.reconstructMSISDN(value);
+                            reconstructedValue = this.reconstructMSISDN(value);
                             break;
-                            
                         case 'time':
-                            processedValue = this.reconstructTime(value);
+                            reconstructedValue = this.reconstructTime(value);
                             break;
-                            
                         case 'cgi':
-                            processedValue = this.reconstructCGI(value);
+                            reconstructedValue = this.reconstructCGI(value);
                             break;
-                            
                         case 'acc':
-                            processedValue = this.reconstructAccelerometer(value);
+                            reconstructedValue = this.reconstructAccelerometer(value);
                             break;
-                            
                         case 'temperature':
                         case 'humidity':
                         case 'pressure':
@@ -179,67 +137,63 @@ class ESP32CBORDecoder {
                         case 'latitude':
                         case 'longitude':
                         case 'hdop':
-                            processedValue = this.dequantizeValue(fieldName, value);
+                            reconstructedValue = this.dequantizeValue(fieldName, value);
+                            break;
+                        case 'rssi':
+                        case 'bat-soc':
+                        case 'ble-m':
+                        case 'gnss':
+                        case 'nsat':
+                            reconstructedValue = String(value);
+                            break;
+                        case 'door':
+                            reconstructedValue = String(value);
                             break;
                     }
                     
-                    decodedData[fieldName] = processedValue;
+                    reconstructedData[fieldName] = reconstructedValue;
                 }
             }
             
-            console.log('✅ CBOR decoding successful');
-            console.log('📊 Decoded fields:', Object.keys(decodedData));
-            return decodedData;
+            return {
+                success: true,
+                decodedData: reconstructedData,
+                version,
+                codec,
+                decodedFields: Object.keys(reconstructedData).length
+            };
             
         } catch (error) {
-            console.error('❌ CBOR decoding failed:', error.message);
-            throw error;
+            return {
+                success: false,
+                error: error.message
+            };
         }
     }
-    
+
     /**
-     * Enrich decoded data with metadata
-     */
-    enrichData(decodedData, metadata = {}) {
-        const enrichedData = {
-            ...decodedData,
-            // Add metadata
-            deviceId: metadata.deviceId || 'ESP32_MARITIME_001',
-            networkType: metadata.networkType || 'astrocast',
-            timestamp: metadata.timestamp || new Date().toISOString(),
-            protocol: 'CBOR',
-            version: '1.0',
-            source: 'ESP32',
-            // Add accelerometer as string if it's an object
-            ...(decodedData.acc && typeof decodedData.acc === 'object' && {
-                acc: `${decodedData.acc.x.toFixed(4)} ${decodedData.acc.y.toFixed(4)} ${decodedData.acc.z.toFixed(4)}`
-            })
-        };
-        
-        return enrichedData;
-    }
-    
-    /**
-     * Send enriched data to Mobius platform
+     * Send data to Mobius platform
      */
     async sendToMobius(enrichedData, mobiusConfig) {
         try {
             console.log('📤 Sending to Mobius platform...');
-            
-            // Send data directly as content instance with correct oneM2M headers
-            const response = await axios.post(mobiusConfig.url, enrichedData, {
+            const payload = {
+                "m2m:cin": {
+                    "con": enrichedData
+                }
+            };
+            const response = await axios.post(mobiusConfig.url, payload, {
                 headers: {
                     'Content-Type': 'application/json;ty=4',
-                    'X-M2M-Ri': `maritime-${Date.now()}`,
-                    'X-M2M-ORIGIN': mobiusConfig.origin || 'Natesh'
+                    'X-M2M-RI': `maritime_${Date.now()}`,
+                    'X-M2M-Origin': 'Natesh',
+                    'Accept': 'application/json'
                 },
                 timeout: 10000
             });
-
             console.log('✅ Mobius transmission successful');
             console.log('📊 Response status:', response.status);
             return response.data;
-
         } catch (error) {
             console.error('❌ Mobius transmission failed:', error.message);
             if (error.response) {
@@ -249,38 +203,48 @@ class ESP32CBORDecoder {
             throw error;
         }
     }
-    
+
     /**
-     * Process complete pipeline: decode → enrich → send to Mobius
+     * Process complete pipeline: CBOR → JSON → Mobius
      */
     async processPipeline(cborBuffer, metadata = {}, mobiusConfig = {}) {
         const startTime = Date.now();
         
         try {
             // Step 1: Decode CBOR
-            const decodedData = this.decodeCBORPayload(cborBuffer);
-            
-            // Step 2: Enrich with metadata
-            const enrichedData = this.enrichData(decodedData, metadata);
-            
-            // Step 3: Send to Mobius (if configured)
-            let mobiusResult = null;
-            if (mobiusConfig.url) {
-                mobiusResult = await this.sendToMobius(enrichedData, mobiusConfig);
+            const decodeResult = this.decodeCBORPayload(cborBuffer);
+            if (!decodeResult.success) {
+                throw new Error(`Decoding failed: ${decodeResult.error}`);
             }
+            
+            // Step 2: Enrich data with metadata
+            const enrichedData = {
+                ...decodeResult.decodedData,
+                deviceId: metadata.deviceId || 'ESP32_UNKNOWN',
+                networkType: metadata.networkType || 'TN/NTN',
+                timestamp: metadata.timestamp || new Date().toISOString(),
+                protocol: 'CBOR',
+                version: '1.0',
+                source: 'ESP32'
+            };
+            
+            // Step 3: Send to Mobius
+            const mobiusResult = await this.sendToMobius(enrichedData, {
+                url: mobiusConfig.url || this.mobiusUrl,
+                origin: mobiusConfig.origin || this.mobiusOrigin
+            });
             
             const processingTime = Date.now() - startTime;
             
             return {
                 success: true,
                 processingTime,
-                decodedData,
+                decodeResult,
                 enrichedData,
                 mobiusResult,
                 stats: {
-                    originalSize: cborBuffer.length,
-                    decodedFields: Object.keys(decodedData).length,
-                    totalFields: Object.keys(this.fieldMapping).length
+                    decodedFields: decodeResult.decodedFields,
+                    totalFields: Object.keys(enrichedData).length
                 }
             };
             
@@ -302,51 +266,43 @@ const decoder = new ESP32CBORDecoder();
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
-app.use('/api/esp32-cbor', express.raw({ type: 'application/octet-stream', limit: '1mb' }));
+app.use(express.raw({ type: 'application/octet-stream', limit: '1mb' }));
 
 // Configuration
-const PORT = process.env.PORT || 3001;  // Changed to 3001 for VM
-const MOBIUS_URL = process.env.MOBIUS_URL || 'http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4';
-const MOBIUS_ORIGIN = process.env.MOBIUS_ORIGIN || 'Natesh';
+const PORT = process.env.PORT || 3001;
 
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
-        service: 'ESP32 CBOR Decoder Gateway',
+        service: 'ESP32 CBOR Decoder (Slave Node)',
         version: '1.0.0',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        mobiusUrl: decoder.mobiusUrl
     });
 });
 
-// Main ESP32 CBOR processing endpoint
+// Main CBOR decoding endpoint
 app.post('/api/esp32-cbor', async (req, res) => {
     try {
         console.log('📥 Received ESP32 CBOR payload');
         
         const cborBuffer = req.body;
         const metadata = {
-            deviceId: req.headers['device-id'] || 'ESP32_MARITIME_001',
+            deviceId: req.headers['device-id'] || 'ESP32_UNKNOWN',
             networkType: req.headers['network-type'] || 'astrocast',
-            timestamp: req.headers['timestamp'] || new Date().toISOString(),
-            originalSize: req.headers['original-size']
+            timestamp: req.headers['timestamp'] || new Date().toISOString()
         };
         
-        const mobiusConfig = {
-            url: MOBIUS_URL,
-            origin: MOBIUS_ORIGIN
-        };
-        
-        const result = await decoder.processPipeline(cborBuffer, metadata, mobiusConfig);
+        const result = await decoder.processPipeline(cborBuffer, metadata);
         
         if (result.success) {
             res.json({
                 success: true,
-                message: 'ESP32 CBOR payload processed successfully',
+                message: 'CBOR payload decoded and sent to Mobius successfully',
                 processingTime: result.processingTime,
                 stats: result.stats,
-                mobiusResult: result.mobiusResult
+                mobiusResponse: result.mobiusResult
             });
         } else {
             res.status(400).json({
@@ -357,60 +313,7 @@ app.post('/api/esp32-cbor', async (req, res) => {
         }
         
     } catch (error) {
-        console.error('❌ ESP32 CBOR processing error:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Test endpoint with sample data
-app.post('/api/test-esp32-cbor', async (req, res) => {
-    try {
-        console.log('🧪 Testing ESP32 CBOR decoder with sample data');
-        
-        // Create sample CBOR payload (this would normally come from ESP32)
-        const sampleData = {
-            0x01: 0x01, // Version
-            0x02: 0x01, // Codec
-            0: 3315537896, // MSISDN (optimized)
-            1: "LMCU1231230", // ISO6346
-            2: 20042300, // Time (optimized)
-            3: 26, // RSSI
-            4: [999, 1, 1, 0x31D41], // CGI array
-            5: 0, // BLE-M
-            6: 92, // Battery SOC
-            7: [-1010040, -1464, -4394], // Accelerometer (quantized)
-            8: 1700, // Temperature (quantized)
-            9: 4400, // Humidity (quantized)
-            10: 101250430, // Pressure (quantized)
-            11: "D", // Door
-            12: 1, // GNSS
-            13: 3189, // Latitude (quantized)
-            14: 2870, // Longitude (quantized)
-            15: 3810, // Altitude (quantized)
-            16: 273, // Speed (quantized)
-            17: 12531, // Heading (quantized)
-            18: 6, // NSAT
-            19: 180 // HDOP (quantized)
-        };
-        
-        const cborBuffer = cbor.encode(sampleData);
-        
-        const result = await decoder.processPipeline(cborBuffer, {
-            deviceId: 'ESP32_TEST_001',
-            networkType: 'test'
-        });
-        
-        res.json({
-            success: true,
-            testResult: result,
-            sampleCborSize: cborBuffer.length
-        });
-        
-    } catch (error) {
-        console.error('❌ Test failed:', error);
+        console.error('❌ Decoding error:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -420,11 +323,10 @@ app.post('/api/test-esp32-cbor', async (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`🚀 ESP32 CBOR Decoder Gateway running on port ${PORT}`);
-    console.log(`📡 Mobius URL: ${MOBIUS_URL}`);
+    console.log(`🚀 ESP32 CBOR Decoder (Slave Node) running on port ${PORT}`);
+    console.log(`📡 Mobius URL: ${decoder.mobiusUrl}`);
     console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-    console.log(`📥 ESP32 CBOR endpoint: http://localhost:${PORT}/api/esp32-cbor`);
-    console.log(`🧪 Test endpoint: http://localhost:${PORT}/api/test-esp32-cbor`);
+    console.log(`📥 CBOR endpoint: http://localhost:${PORT}/api/esp32-cbor`);
 });
 
 module.exports = { ESP32CBORDecoder, app }; 
