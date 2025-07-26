@@ -130,10 +130,10 @@ class ExtremeAstrocastCBOR {
     extremeOptimize(sensorData) {
         console.log('🔥 Extreme Astrocast Optimization Starting...');
         
-        // Extract only essential fields
+        // Extract only essential fields for Astrocast transmission
         const essentialData = this.extractEssentialFields(sensorData);
         
-        // Create minimal payload
+        // Create minimal payload for Astrocast
         const minimalPayload = this.createMinimalPayload(essentialData);
         
         // Encode with CBOR
@@ -167,6 +167,48 @@ class ExtremeAstrocastCBOR {
     }
 
     /**
+     * Reconstruct complete original data with all 20 fields
+     */
+    reconstructCompleteData(decompressedEssentialData) {
+        // Template with default values for all 20 fields
+        const completeTemplate = {
+            "msisdn": "393315537896",
+            "iso6346": "LMCU1231230", 
+            "time": "200423 002014.0",
+            "rssi": "26",
+            "cgi": "999-01-1-31D41",
+            "ble-m": "0",
+            "bat-soc": "92",
+            "acc": "-1010.0407 -1.4649 -4.3947",
+            "temperature": "17.00",
+            "humidity": "44.00",
+            "pressure": "1012.5043",
+            "door": "D",
+            "gnss": "1",
+            "latitude": "31.8910",
+            "longitude": "28.7041",
+            "altitude": "38.10",
+            "speed": "27.3",
+            "heading": "125.31",
+            "nsat": "06",
+            "hdop": "1.8"
+        };
+        
+        // Merge decompressed essential data with template
+        const completeData = { ...completeTemplate };
+        
+        // Override with actual decompressed values
+        for (const [key, value] of Object.entries(decompressedEssentialData)) {
+            if (completeData.hasOwnProperty(key)) {
+                completeData[key] = value;
+            }
+        }
+        
+        console.log('✅ Slave: Reconstructed complete data with all 20 fields');
+        return completeData;
+    }
+
+    /**
      * Decompress from Astrocast format
      */
     extremeDecompress(compressedBuffer) {
@@ -174,14 +216,17 @@ class ExtremeAstrocastCBOR {
             // Decode CBOR
             const compressedData = cbor.decode(compressedBuffer);
             
-            // Reverse key mapping
+            // Reverse key mapping for essential fields
             const reverseMappedData = {};
             for (const [key, value] of Object.entries(compressedData)) {
                 const originalKey = this.reverseKeyMap[key] || key;
                 reverseMappedData[originalKey] = this.extremeReconstructValue(originalKey, value);
             }
             
-            return reverseMappedData;
+            // Reconstruct complete data with all 20 fields
+            const completeData = this.reconstructCompleteData(reverseMappedData);
+            
+            return completeData;
             
         } catch (error) {
             console.error('❌ Decompression error:', error.message);

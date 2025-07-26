@@ -17,7 +17,7 @@ services:
       - NODE_MODE=master
       - NODE_ENV=production
       - PORT=3000
-      - SLAVE_URL=http://astrocast-slave:3000/api/receive-compressed
+      - SLAVE_URL=http://172.25.1.78:3001/api/receive-compressed
     restart: unless-stopped
     networks:
       - astrocast-local-network
