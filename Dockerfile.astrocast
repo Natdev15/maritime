@@ -1,51 +1,46 @@
-# Astrocast Maritime Pipeline Dockerfile
-# Optimized for ESP32 → Astrocast → Slave → Mobius pipeline
+# Astrocast Maritime IoT Pipeline Dockerfile
+# Optimized for Node.js application with CBOR compression
 
 FROM node:18-alpine
-
-# Install system dependencies for CBOR and native modules
-RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    sqlite \
-    bash \
-    curl
 
 # Set working directory
 WORKDIR /app
 
+# Install system dependencies
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/cache/apk/*
+
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install Node.js dependencies
+RUN npm ci --only=production && npm cache clean --force
 
 # Copy application files
 COPY *.js ./
-COPY data/ ./data/
+
+# Create data directory if it doesn't exist
+RUN mkdir -p ./data
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Change ownership
+# Change ownership of the app directory
 RUN chown -R nodejs:nodejs /app
 
 # Switch to non-root user
 USER nodejs
 
-# Set environment variables
-ENV NODE_ENV=production
-ENV NODE_MODE=master
-ENV PORT=3000
-
 # Expose port
 EXPOSE 3000
 
-# Health check (commented out to avoid unhealthy status)
-# HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-#   CMD curl -f http://localhost:3000/api/health || exit 1
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3000/api/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 
-# Start command
+# Start the application
 CMD ["node", "astrocast-server.js"] 

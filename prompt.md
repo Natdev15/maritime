@@ -1,1 +1,0 @@
-Don't write any code until you're very confident (95% or more) in what needs to be done. If unclear, ask for more info.

@@ -6,7 +6,7 @@ const app = express();
 
 // Environment configuration
 const NODE_MODE = process.env.NODE_MODE || 'master';
-const PORT = NODE_MODE === 'master' ? 3000 : 3001;
+const PORT = process.env.PORT || (NODE_MODE === 'master' ? 3000 : 3000);
 const MOBIUS_URL = process.env.MOBIUS_URL || 'http://172.25.1.78:7579/Mobius/Natesh/NateshContainer?ty=4';
 const SLAVE_URL = process.env.SLAVE_URL || 'http://172.25.1.78:3001/api/receive-compressed';
 
@@ -26,14 +26,14 @@ class AstrocastMasterHandler {
             
             const result = astrocastService.extremeOptimize(sensorData);
             
-            if (!result.success) {
-                throw new Error(`Astrocast compression failed: ${result.error}`);
+            if (!result.astrocastCompatible) {
+                throw new Error(`Astrocast compression failed: Payload too large (${result.compressedSize}/${astrocastService.ASTROCAST_LIMIT} bytes)`);
             }
             
             console.log(`✅ Master: Astrocast compression successful (${result.compressedSize}/${astrocastService.ASTROCAST_LIMIT} bytes)`);
             
             return {
-                compressedData: result.compressedData,
+                compressedData: result.compressedBuffer,
                 optimizationReport: {
                     originalSize: result.originalSize,
                     compressedSize: result.compressedSize,
@@ -94,17 +94,13 @@ class AstrocastSlaveHandler {
         try {
             console.log('🔄 Slave: Decompressing Astrocast data...');
             
-            const result = astrocastService.extremeDecompress(compressedBuffer);
-            
-            if (!result.success) {
-                throw new Error(`Astrocast decompression failed: ${result.error}`);
-            }
+            const decompressedData = astrocastService.extremeDecompress(compressedBuffer);
             
             console.log('✅ Slave: Astrocast decompression successful');
             
             return {
-                decompressedData: result.decompressedData,
-                originalCompressedSize: result.originalCompressedSize
+                decompressedData: decompressedData,
+                originalCompressedSize: compressedBuffer.length
             };
             
         } catch (error) {
