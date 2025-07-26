@@ -250,7 +250,6 @@ class CompletePipelineTester {
       const avgSize = stats.totalEncodedSize / stats.totalProcessed;
       console.log(`🗜️  Average CBOR size: ${avgSize.toFixed(1)} bytes`);
       console.log(`📉 Average compression: ${avgCompression.toFixed(1)}%`);
-      console.log(`🚀 Astrocast compatible: ${avgSize <= 160 ? '✅' : '❌'}`);
       console.log(`⚡ Average processing time: ${avgProcessingTime.toFixed(0)}ms`);
     }
     

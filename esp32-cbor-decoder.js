@@ -49,7 +49,7 @@ class ESP32CBORDecoder {
     reconstructMSISDN(optimizedValue) {
         if (typeof optimizedValue === 'number') {
             // Add back the "39" prefix and pad to full length
-            return `393315537${String(optimizedValue).padStart(3, '0')}`;
+            return `393315537${String(optimizedValue).padStart(2, '0')}`;
         }
         return optimizedValue;
     }

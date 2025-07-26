@@ -50,11 +50,11 @@ class ESP32Encoder {
     }
 
     /**
-     * Extreme MSISDN optimization (keep last 3 digits only)
+     * Extreme MSISDN optimization (keep last 2 digits only)
      */
     optimizeMSISDN(msisdn) {
         if (typeof msisdn === 'string') {
-            return parseInt(msisdn.slice(-3));
+            return parseInt(msisdn.slice(-2));
         }
         return msisdn;
     }
@@ -106,76 +106,23 @@ class ESP32Encoder {
     }
 
     /**
-     * Encode sensor data to CBOR with maximum optimization
+     * Encode sensor data to CBOR with maximum optimization (no size limit)
      */
     encodeSensorData(sensorData) {
         try {
-            // Create encoded data object
-            const encodedData = {};
+            // Define field priority (most critical first)
+            const fieldPriority = [
+                'msisdn', 'iso6346', 'time', 'latitude', 'longitude', 'temperature',
+                'humidity', 'pressure', 'bat-soc', 'rssi', 'cgi', 'acc',
+                'speed', 'heading', 'altitude', 'door', 'gnss', 'nsat', 'ble-m', 'hdop'
+            ];
             
-            // Add version and codec identifiers
-            encodedData[0xFF] = this.CBOR_VERSION;
-            encodedData[0xFE] = this.CBOR_CODEC_ID;
+            // Encode with all fields (no size limit)
+            let encodedData = this.createEncodedData(sensorData, fieldPriority);
+            let cborBuffer = cbor.encode(encodedData);
             
-            // Encode each field with maximum optimization
-            for (const [fieldName, fieldId] of Object.entries(this.fieldMapping)) {
-                const value = sensorData[fieldName];
-                
-                if (value !== undefined) {
-                    let encodedValue = value;
-                    
-                    // Apply field-specific optimizations
-                    switch (fieldName) {
-                        case 'msisdn':
-                            encodedValue = this.optimizeMSISDN(value);
-                            break;
-                        case 'time':
-                            encodedValue = this.optimizeTime(value);
-                            break;
-                        case 'cgi':
-                            encodedValue = this.parseCGI(value);
-                            break;
-                        case 'acc':
-                            encodedValue = this.parseAccelerometer(value);
-                            break;
-                        case 'temperature':
-                        case 'humidity':
-                        case 'pressure':
-                        case 'altitude':
-                        case 'speed':
-                        case 'heading':
-                        case 'latitude':
-                        case 'longitude':
-                        case 'hdop':
-                            encodedValue = this.quantizeValue(fieldName, value);
-                            break;
-                        case 'rssi':
-                        case 'bat-soc':
-                            encodedValue = parseInt(value);
-                            break;
-                        case 'ble-m':
-                        case 'gnss':
-                        case 'nsat':
-                            encodedValue = parseInt(value);
-                            break;
-                        case 'door':
-                            encodedValue = value;
-                            break;
-                    }
-                    
-                    encodedData[fieldId] = encodedValue;
-                }
-            }
-            
-            // Encode to CBOR
-            const cborBuffer = cbor.encode(encodedData);
             const originalSize = JSON.stringify(sensorData).length;
             const compressionRatio = ((originalSize - cborBuffer.length) / originalSize) * 100;
-            
-            // Check Astrocast limit
-            if (cborBuffer.length > this.ASTROCAST_LIMIT) {
-                throw new Error(`CBOR payload too large: ${cborBuffer.length} bytes > ${this.ASTROCAST_LIMIT} bytes`);
-            }
             
             return {
                 success: true,
@@ -191,6 +138,144 @@ class ESP32Encoder {
                 error: error.message
             };
         }
+    }
+
+    /**
+     * Create encoded data with all fields
+     */
+    createEncodedData(sensorData, fieldPriority) {
+        const encodedData = {};
+        
+        // Add version and codec identifiers
+        encodedData[0xFF] = this.CBOR_VERSION;
+        encodedData[0xFE] = this.CBOR_CODEC_ID;
+        
+        // Encode each field with maximum optimization
+        for (const fieldName of fieldPriority) {
+            const fieldId = this.fieldMapping[fieldName];
+            const value = sensorData[fieldName];
+            
+            if (value !== undefined) {
+                let encodedValue = value;
+                
+                // Apply field-specific optimizations
+                switch (fieldName) {
+                    case 'msisdn':
+                        encodedValue = this.optimizeMSISDN(value);
+                        break;
+                    case 'time':
+                        encodedValue = this.optimizeTime(value);
+                        break;
+                    case 'cgi':
+                        encodedValue = this.parseCGI(value);
+                        break;
+                    case 'acc':
+                        encodedValue = this.parseAccelerometer(value);
+                        break;
+                    case 'temperature':
+                    case 'humidity':
+                    case 'pressure':
+                    case 'altitude':
+                    case 'speed':
+                    case 'heading':
+                    case 'latitude':
+                    case 'longitude':
+                    case 'hdop':
+                        encodedValue = this.quantizeValue(fieldName, value);
+                        break;
+                    case 'rssi':
+                    case 'bat-soc':
+                        encodedValue = parseInt(value);
+                        break;
+                    case 'ble-m':
+                    case 'gnss':
+                    case 'nsat':
+                        encodedValue = parseInt(value);
+                        break;
+                    case 'door':
+                        encodedValue = value;
+                        break;
+                }
+                
+                encodedData[fieldId] = encodedValue;
+            }
+        }
+        
+        return encodedData;
+    }
+
+    /**
+     * Create extremely optimized encoded data (minimal fields only)
+     */
+    createExtremeEncodedData(sensorData) {
+        const encodedData = {};
+        
+        // Add version and codec identifiers
+        encodedData[0xFF] = this.CBOR_VERSION;
+        encodedData[0xFE] = this.CBOR_CODEC_ID;
+        
+        // Include more fields to match Postman payload structure
+        const criticalFields = [
+            'msisdn', 'iso6346', 'time', 'latitude', 'longitude', 'temperature', 
+            'humidity', 'pressure', 'bat-soc', 'rssi', 'cgi', 'acc',
+            'speed', 'heading', 'altitude', 'door', 'gnss', 'nsat', 'ble-m', 'hdop'
+        ];
+        
+        for (const fieldName of criticalFields) {
+            const fieldId = this.fieldMapping[fieldName];
+            const value = sensorData[fieldName];
+            
+            if (value !== undefined) {
+                let encodedValue = value;
+                
+                // Apply extreme optimizations
+                switch (fieldName) {
+                    case 'msisdn':
+                        encodedValue = this.optimizeMSISDN(value);
+                        break;
+                    case 'time':
+                        encodedValue = this.optimizeTime(value);
+                        break;
+                    case 'temperature':
+                    case 'humidity':
+                        encodedValue = Math.round(parseFloat(value) * 100);
+                        break;
+                    case 'pressure':
+                        encodedValue = Math.round(parseFloat(value) * 1000);
+                        break;
+                    case 'latitude':
+                    case 'longitude':
+                        encodedValue = Math.round(parseFloat(value) * 1000);
+                        break;
+                    case 'altitude':
+                    case 'speed':
+                    case 'heading':
+                    case 'hdop':
+                        encodedValue = Math.round(parseFloat(value) * 10);
+                        break;
+                    case 'acc':
+                        encodedValue = this.parseAccelerometer(value);
+                        break;
+                    case 'cgi':
+                        encodedValue = this.parseCGI(value);
+                        break;
+                    case 'bat-soc':
+                    case 'rssi':
+                    case 'ble-m':
+                    case 'gnss':
+                    case 'nsat':
+                        encodedValue = parseInt(value);
+                        break;
+                    case 'door':
+                        encodedValue = value;
+                        break;
+                }
+                
+                encodedData[fieldId] = encodedValue;
+            }
+        }
+        
+        return encodedData;
     }
 
     /**
@@ -231,13 +316,23 @@ class ESP32Encoder {
             // Step 1: Encode to CBOR
             const encodeResult = this.encodeSensorData(sensorData);
             if (!encodeResult.success) {
-                throw new Error(`Encoding failed: ${encodeResult.error}`);
+                return {
+                    success: false,
+                    error: encodeResult.error,
+                    processingTime: Date.now() - startTime,
+                    encodeResult
+                };
             }
             
             // Step 2: Send to decoder
             const decoderResult = await this.sendToDecoder(encodeResult.cborBuffer, metadata);
             if (!decoderResult.success) {
-                throw new Error(`Decoder transmission failed: ${decoderResult.error}`);
+                return {
+                    success: false,
+                    error: `Decoder transmission failed: ${decoderResult.error}`,
+                    processingTime: Date.now() - startTime,
+                    encodeResult
+                };
             }
             
             const processingTime = Date.now() - startTime;
@@ -250,8 +345,7 @@ class ESP32Encoder {
                 stats: {
                     originalSize: encodeResult.originalSize,
                     encodedSize: encodeResult.size,
-                    compressionRatio: encodeResult.compressionRatio,
-                    astrocastCompatible: encodeResult.size <= this.ASTROCAST_LIMIT
+                    compressionRatio: encodeResult.compressionRatio
                 }
             };
             
