@@ -260,9 +260,32 @@ class ESP32CBORDecoder {
     }
 }
 
+
 // Express server setup
 const app = express();
 const decoder = new ESP32CBORDecoder();
+
+// In-memory retry queue for failed Mobius transmissions
+const retryQueue = [];
+const RETRY_INTERVAL_MS = 15000; // 15 seconds
+
+// Retry worker
+async function retryWorker() {
+    if (retryQueue.length === 0) return;
+    console.log(`🔄 Retrying ${retryQueue.length} queued Mobius transmissions...`);
+    for (let i = 0; i < retryQueue.length; i++) {
+        const { enrichedData, mobiusConfig } = retryQueue[i];
+        try {
+            await decoder.sendToMobius(enrichedData, mobiusConfig);
+            console.log('✅ Queued Mobius transmission successful');
+            retryQueue.splice(i, 1); // Remove from queue
+            i--;
+        } catch (err) {
+            console.log('❌ Queued Mobius transmission failed, will retry.');
+        }
+    }
+}
+setInterval(retryWorker, RETRY_INTERVAL_MS);
 
 // Middleware
 app.use(cors());
@@ -278,25 +301,48 @@ app.get('/health', (req, res) => {
         service: 'ESP32 CBOR Decoder (Slave Node)',
         version: '1.0.0',
         timestamp: new Date().toISOString(),
-        mobiusUrl: decoder.mobiusUrl
+        mobiusUrl: decoder.mobiusUrl,
+        retryQueueLength: retryQueue.length
     });
+});
+
+// Start server
+app.listen(PORT, () => {
+    console.log(`🚀 ESP32 CBOR Decoder (Slave Node) running on port ${PORT}`);
 });
 
 // Main CBOR decoding endpoint
 app.post('/api/esp32-cbor', async (req, res) => {
     try {
         console.log('📥 Received ESP32 CBOR payload');
-        
         const cborBuffer = req.body;
+        // Log compressed CBOR payload size
+        if (cborBuffer && cborBuffer.length !== undefined) {
+            console.log(`📦 Compressed data size: ${cborBuffer.length} bytes`);
+        }
+
         const metadata = {
             deviceId: req.headers['device-id'] || 'ESP32_UNKNOWN',
             networkType: req.headers['network-type'] || 'astrocast',
             timestamp: req.headers['timestamp'] || new Date().toISOString()
         };
-        
+
         const result = await decoder.processPipeline(cborBuffer, metadata);
-        
+
         if (result.success) {
+            // Mobius acknowledgment logging
+            if (result.mobiusResult) {
+                const mobiusAck = JSON.stringify(result.mobiusResult);
+                console.log(`📥 Mobius acknowledgment size: ${Buffer.byteLength(mobiusAck)} bytes`);
+            }
+            if (result.mobiusResult && result.mobiusResult['m2m:cin']) {
+                // Try to log HTTP status if available (may need to adjust based on Mobius response)
+                if (result.mobiusResult.status) {
+                    console.log(`🔔 Mobius HTTP status: ${result.mobiusResult.status}`);
+                } else {
+                    console.log('🔔 Mobius HTTP status: (see response headers/logs)');
+                }
+            }
             res.json({
                 success: true,
                 message: 'CBOR payload decoded and sent to Mobius successfully',
@@ -311,7 +357,6 @@ app.post('/api/esp32-cbor', async (req, res) => {
                 processingTime: result.processingTime
             });
         }
-        
     } catch (error) {
         console.error('❌ Decoding error:', error);
         res.status(500).json({
@@ -320,13 +365,3 @@ app.post('/api/esp32-cbor', async (req, res) => {
         });
     }
 });
-
-// Start server
-app.listen(PORT, () => {
-    console.log(`🚀 ESP32 CBOR Decoder (Slave Node) running on port ${PORT}`);
-    console.log(`📡 Mobius URL: ${decoder.mobiusUrl}`);
-    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-    console.log(`📥 CBOR endpoint: http://localhost:${PORT}/api/esp32-cbor`);
-});
-
-module.exports = { ESP32CBORDecoder, app }; 

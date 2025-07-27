@@ -292,13 +292,24 @@ class ESP32Encoder {
                 },
                 timeout: 10000
             });
-            
+            // Log decoder acknowledgment and HTTP status
+            console.log('🔔 Decoder HTTP status:', response.status);
+            if (response.data) {
+                const ack = JSON.stringify(response.data);
+                console.log(`📥 Decoder acknowledgment size: ${Buffer.byteLength(ack)} bytes`);
+                console.log('📥 Decoder acknowledgment:', ack);
+            }
             return {
                 success: true,
-                response: response.data
+                response: response.data,
+                status: response.status
             };
-            
         } catch (error) {
+            console.error('❌ Decoder transmission failed:', error.message);
+            if (error.response) {
+                console.error('📋 Decoder response status:', error.response.status);
+                console.error('📋 Decoder response data:', error.response.data);
+            }
             return {
                 success: false,
                 error: error.message
@@ -489,3 +500,5 @@ app.listen(PORT, () => {
 });
 
 module.exports = { ESP32Encoder, app }; 
+
+module.exports = ESP32Encoder;
